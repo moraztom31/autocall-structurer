@@ -231,7 +231,19 @@ expensive. It cannot carry a revision on its own.
 
 Pick an index, set the terms, price it. Spot and price history are pulled
 live; everything else is yours to set — maturity, coupon frequency, barriers,
-autocall schedule, issue price, credit spread, and a synthetic decrement.
+autocall schedule, issue price, credit spread, and the carry.
+
+### Dividends are not optional
+
+The underlying is either a **standard index**, which pays dividends, or a
+**decrement index**, which deducts a fixed performance instead. Either way a
+number is subtracted from the risk-neutral drift, and leaving it at zero is
+not a conservative simplification — it is an error. A price index earns no
+dividends, so the note holder receives none either, and pricing a 3 %-yielding
+index at zero overstates the forward by roughly 16 % over five years. On a 5Y
+Phoenix that is worth about **217 bp of margin**, and it halves the apparent
+probability of capital loss. The decrement *replaces* the dividend yield
+rather than adding to it.
 
 ### On volatility
 

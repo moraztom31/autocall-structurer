@@ -173,6 +173,7 @@ with st.sidebar:
         spread = wx.CREDIT_GRID[tenor]
 
         spot, decrement = wx.SPOT, wx.DECREMENT
+        carry_label = "Index decrement"
         underlying = wx.INDEX_NAME
         maturity, freq = 5.0, 4
         ac_start, ac_freq = 1.0, 1
@@ -216,10 +217,26 @@ with st.sidebar:
                                  0.0005, format="%.4f",
                                  help="Applied to the note's cash flows "
                                       "only, never to the index drift.")
-        decrement = st.number_input("Index decrement p.a.", 0.0, 0.10, 0.0,
-                                    0.005, format="%.3f",
-                                    help="Above zero prices a synthetic "
-                                         "decrement version of this index.")
+        st.markdown("### Carry")
+        carry_kind = st.radio(
+            "Underlying type", ["Standard index", "Decrement index"],
+            label_visibility="collapsed",
+            captions=["Pays dividends", "Fixed deduction instead"])
+        if carry_kind == "Standard index":
+            decrement = st.number_input(
+                "Dividend yield p.a.", 0.0, 0.10, 0.030, 0.005,
+                format="%.3f",
+                help="Deducted from the risk-neutral drift. Leaving it "
+                     "at zero overstates the forward and every figure "
+                     "that follows from it.")
+            carry_label = "Dividend yield"
+        else:
+            decrement = st.number_input(
+                "Decrement p.a.", 0.0, 0.10, 0.050, 0.005,
+                format="%.3f",
+                help="A published deduction that replaces the dividend "
+                     "yield rather than adding to it.")
+            carry_label = "Index decrement"
         underlying = quote.name
 
         st.markdown("### Schedule")
@@ -398,7 +415,7 @@ with t_product:
              if deal.airbag else "None"),
         ]
         if decrement:
-            rows.insert(2, ("Index decrement", f"{decrement:.2%} p.a."))
+            rows.insert(2, (carry_label, f"{decrement:.2%} p.a."))
         term_sheet(rows)
 
     with c2:
@@ -536,13 +553,19 @@ with t_mc:
     st.altair_chart(charts.path_fan(paths, schedule, spot, deal),
                     use_container_width=True)
 
-    if decrement > 0:
+    if decrement > 0 and carry_label == "Index decrement":
         note(f"The cloud tilts down because the index deducts "
              f"{decrement:.1%} a year by construction. Under the "
              "risk-neutral measure the drift is the risk-free rate less "
              "that deduction, so the underlying equities have to outpace "
              "the deduction before the index goes anywhere — which is "
              "what makes the autocall harder to reach than it looks.")
+    elif decrement > 0:
+        note(f"The drift is the risk-free rate less the "
+             f"{decrement:.1%} dividend yield. A price index earns no "
+             "dividends, so under the risk-neutral measure it drifts "
+             "below the funding rate — and the holder of the note "
+             "receives none of them either.")
 
     st.subheader("Distribution of outcomes")
     st.altair_chart(
