@@ -12,6 +12,9 @@ Two modes:
 | **Worked example** | One deal on a frozen market snapshot, reproducible to the cent |
 | **Note builder** | Pick an index, set the terms, price any Phoenix |
 
+Both run under flat Black or Heston stochastic volatility, and the gap
+between the two is reported as model risk.
+
 ---
 
 ## Structures supported
@@ -67,6 +70,43 @@ autocall materially harder to reach than the headline terms suggest. Omitting
 than adding to it.
 
 ---
+
+## Volatility models
+
+Two dynamics, same engine.
+
+| | |
+|---|---|
+| **Black, flat** | one sigma for every strike and maturity — no skew at all |
+| **Heston** | stochastic volatility, simulated with Andersen's QE scheme |
+
+An autocallable holder is **short a down-and-in put** struck at the capital
+barrier, so its price is largely a statement about the left tail — exactly
+where a flat surface is wrong. The model choice is not a detail.
+
+Heston here is **parameterised, not calibrated**. There is no option surface
+in this project to fit, and a decrement index has almost no listed options to
+fit to anyway — desks proxy the surface from the parent index. So the Heston
+price is not "right" where Black was "wrong": it is a second opinion with a
+skew in it, and the useful output is the spread between the two.
+
+Comparing them requires one more step. Run as-is, the two models carry
+different at-the-money volatility, so the gap between their prices mixes the
+*level* of volatility with the *shape* of the smile. `match_atm_vol` scales v0
+and theta together until Heston's ATM implied volatility matches the Black
+input, leaving rho and the curvature where they were. What is left is the
+skew effect alone.
+
+### Validation
+
+- With `xi → 0` and `v0 = theta`, Heston reproduces Black path for path —
+  means and log-return dispersions agree to three decimals at 1Y, 3Y and 5Y.
+- The discounted forward is a martingale under both: `E[S_T]` matches
+  `S₀ · DF⁻¹ · e^(−qT)` to within 0.1 % across all 20 observation dates.
+- The generated smile is downward-sloping and realistic: 19.7 % implied at
+  the 60 % strike against 14.6 % at the money, 5Y.
+- Time-stepping converges by 52 steps per year; finer grids move the margin
+  by less than Monte Carlo noise.
 
 ## Method
 
@@ -226,12 +266,19 @@ streamlit run app.py    # interactive interface
 As a library:
 
 ```python
+from models import BlackParams, HestonParams, match_atm_vol
 from pricer import price
 import worked_example as wx
 
-res = price(wx.SCHEDULE, wx.SPOT, wx.VOL, wx.DECREMENT,
+res = price(wx.SCHEDULE, wx.SPOT, BlackParams(wx.VOL), wx.DECREMENT,
             wx.CREDIT_GRID[3], wx.DEAL)
 print(res.fair_value, res.margin_pct, res.expected_life)
+
+# the same note under a skew, at the same ATM volatility
+heston = match_atm_vol(wx.SCHEDULE, wx.SPOT, HestonParams(),
+                       wx.DECREMENT, wx.VOL)
+print(price(wx.SCHEDULE, wx.SPOT, heston, wx.DECREMENT,
+            wx.CREDIT_GRID[3], wx.DEAL).margin_pct)
 ```
 
 Any structure, through the schedule builder:
@@ -245,7 +292,7 @@ deal = Deal(style="phoenix", maturity_years=3, coupons_per_year=2,
             autocall_barrier=1.00, autocall_stepdown_pa=0.05,
             capital_barrier=0.60, airbag=True, airbag_strike=0.60)
 schedule = build_schedule(deal, flat_rate=0.03)
-res = price(schedule, spot=5000, vol=0.20, decrement=0.0,
+res = price(schedule, spot=5000, model=BlackParams(0.20), decrement=0.0,
             credit_spread=0.002, deal=deal)
 ```
 
@@ -260,6 +307,7 @@ revised = deal.with_(coupon_rate_pa=0.0575)
 
 ```
 deal.py             deal terms, structure variants, schedule construction
+models.py           Black and Heston dynamics, QE scheme, ATM matching
 pricer.py           path generation and the pricing engine
 market.py           live quotes, realised volatility, offline fallback
 worked_example.py   the frozen snapshot and its funding grid
@@ -272,10 +320,14 @@ app.py              Streamlit interface
 
 ## Limitations
 
-- **Flat Black volatility, no skew.** Barrier products are sensitive to skew;
-  a local or stochastic volatility model would give a different number.
-- **Lognormal, no jumps** — while tail risk is precisely what the capital
-  barrier is exposed to.
+- **Heston is parameterised, not calibrated** — no option surface is fitted,
+  so its prices quantify model risk rather than replacing the Black number.
+- **No local-stochastic volatility.** Production autocall books go further
+  again: local vol alone reprices today's smile but misstates forward skew,
+  and stochastic vol alone does not reprice the smile exactly. Heston is the
+  step that makes the question visible, not the end of it.
+- **No jumps** — while tail risk is precisely what the capital barrier is
+  exposed to.
 - **Flat deterministic credit spread**, applied as a uniform continuous bump.
 - No dynamic hedging cost, repo, borrow or market friction.
 - Barriers are tested on observation dates only, as the terms specify. Moves

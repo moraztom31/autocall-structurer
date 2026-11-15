@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+import models
 from deal import NOMINAL, Deal
 
 
@@ -45,36 +46,21 @@ class Result:
     inputs: dict = field(default_factory=dict)
 
 
-def simulate_paths(schedule, spot, vol, decrement, n_paths=50_000, seed=42):
+def simulate_paths(schedule, spot, model, decrement, n_paths=50_000,
+                   seed=42, **kw):
     """
     Index levels at every observation date under the risk-neutral measure.
 
-    The GBM is simulated exactly in log space, so there is no
-    discretisation error from the time step:
-
-        S(t+dt) = S(t) * exp[ (f - q - vol^2/2)*dt + vol*sqrt(dt)*Z ]
-
-    f is the forward rate over the step and q the index decrement. On a
-    decrement index q is a published deduction rather than a dividend
-    yield, and it is already reflected in the quoted level - so it is
-    modelled here and no separate dividend is subtracted.
-
-    Antithetic sampling pairs each draw Z with -Z, which halves the
-    standard error of the mean at no extra cost.
+    `model` is a BlackParams or a HestonParams; the dynamics live in
+    models.py. On a decrement index the deduction q is a published rule
+    rather than a dividend yield, and it is already reflected in the
+    quoted level - so it enters the drift and no separate dividend is
+    subtracted.
 
     Returns an array of shape (n_paths, len(schedule)).
     """
-    fwd, dt = schedule.forward_rates()
-
-    rng = np.random.default_rng(seed)
-    half = n_paths // 2
-    z_half = rng.standard_normal((half, len(schedule)))
-    z = np.concatenate([z_half, -z_half], axis=0)
-
-    drift = (fwd - decrement - 0.5 * vol**2) * dt
-    diffusion = vol * np.sqrt(dt)
-
-    return spot * np.exp(np.cumsum(drift + diffusion * z, axis=1))
+    return models.simulate(schedule, spot, model, decrement, n_paths,
+                           seed, **kw)
 
 
 def _exit_index(paths, schedule, spot):
@@ -163,18 +149,20 @@ def _redemption(paths, spot, deal, exit_idx, any_call):
                     np.where(at_maturity, NOMINAL, below))
 
 
-def price(schedule, spot, vol, decrement, credit_spread,
+def price(schedule, spot, model, decrement, credit_spread,
           deal=None, n_paths=50_000, seed=42, paths=None):
     """
     Price an autocallable note and return value, margin and diagnostics.
 
-    Pass `paths` to reuse an existing simulation - useful when repricing
-    the same market scenario against several sets of terms.
+    `model` is a BlackParams or a HestonParams. Pass `paths` to reuse an
+    existing simulation - useful when repricing the same market scenario
+    against several sets of terms.
     """
     deal = deal or Deal()
 
     if paths is None:
-        paths = simulate_paths(schedule, spot, vol, decrement, n_paths, seed)
+        paths = simulate_paths(schedule, spot, model, decrement,
+                               n_paths, seed)
 
     disc = schedule.df_note(credit_spread)
 
@@ -208,7 +196,10 @@ def price(schedule, spot, vol, decrement, credit_spread,
         total_payout=coupon_cash.sum(axis=1) + redemption,
         final_level_pct=final_level / spot,
         inputs={
-            "n_paths": paths.shape[0], "vol": vol, "spot": spot,
+            "n_paths": paths.shape[0], "spot": spot,
+            "model": getattr(model, "label", "?"),
+            "model_detail": model.describe(),
+            "spot_vol": models.implied_spot_vol(model),
             "decrement": decrement, "credit_spread": credit_spread,
             "style": deal.style, "coupon_rate_pa": deal.coupon_rate_pa,
             "coupon_barrier": deal.effective_coupon_barrier,

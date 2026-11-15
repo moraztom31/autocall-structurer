@@ -18,6 +18,7 @@ import charts
 import worked_example as wx
 from deal import ATHENA, NOMINAL, PHOENIX, Deal, build_schedule
 from market import DEFAULT_RATE, DEFAULT_VOL, INDICES, fetch_quote
+from models import BlackParams, HestonParams, match_atm_vol
 from pricer import payoff_at_maturity, price, simulate_paths
 
 st.set_page_config(page_title="Autocallable Structurer",
@@ -88,6 +89,20 @@ st.markdown("""
 @st.cache_data(show_spinner=False, ttl=900)
 def cached_quote(ticker):
     return fetch_quote(ticker)
+
+
+@st.cache_data(show_spinner=False)
+def calibrated_heston(_schedule, spot, decrement, target_vol,
+                      theta_v, kappa, xi, rho):
+    """
+    Heston scaled so its ATM implied volatility matches the Black input.
+
+    Cached because the scaling itself runs several simulations, and
+    without it every slider move would pay for the whole search again.
+    """
+    raw = HestonParams(v0=target_vol**2, theta=theta_v**2, kappa=kappa,
+                       xi=xi, rho=rho)
+    return match_atm_vol(_schedule, spot, raw, decrement, target_vol)
 
 
 def cards(items):
@@ -219,6 +234,33 @@ with st.sidebar:
         ac_freq = st.select_slider("Autocall frequency", options=[1, 2, 4],
                                    value=1, format_func=FREQ.get)
 
+    st.markdown("### Volatility model")
+    model_name = st.radio(
+        "Model", ["Black, flat", "Heston"], horizontal=True,
+        label_visibility="collapsed",
+        captions=["One sigma, no skew", "Stochastic vol, with skew"])
+
+    if model_name == "Heston":
+        st.caption("Parameterised, not calibrated — there is no option "
+                   "surface here to fit, and a decrement index has "
+                   "almost no listed options to fit to.")
+        h_theta = st.slider("Long-run vol (theta)", 0.08, 0.40, 0.18,
+                            0.01, format="%.2f")
+        h_kappa = st.slider("Mean reversion (kappa)", 0.2, 5.0, 1.5, 0.1,
+                            format="%.1f")
+        h_xi = st.slider("Vol of vol (xi)", 0.05, 1.50, 0.55, 0.05,
+                         format="%.2f",
+                         help="Smile curvature.")
+        h_rho = st.slider("Spot/vol correlation (rho)", -0.95, 0.0, -0.70,
+                          0.05, format="%.2f",
+                          help="Skew. Negative on equities: volatility "
+                               "rises as the index falls.")
+        match_atm = st.toggle(
+            "Match ATM vol to the Black input", value=True,
+            help="Scales v0 and theta so both models carry the same "
+                 "at-the-money volatility. Without it, the gap between "
+                 "them mixes the level of vol with the skew.")
+
     st.markdown("### Structure")
     style_label = st.radio(
         "Style", ["Phoenix", "Athena"], horizontal=True,
@@ -278,19 +320,30 @@ deal = Deal(style=style, maturity_years=maturity, coupon_rate_pa=coupon,
 schedule = (wx.schedule_for(deal) if mode == "Worked example"
             else build_schedule(deal, flat_rate))
 
+black = BlackParams(vol)
+if model_name == "Heston":
+    if match_atm:
+        model = calibrated_heston(schedule, spot, decrement, vol,
+                                  h_theta, h_kappa, h_xi, h_rho)
+    else:
+        model = HestonParams(v0=vol**2, theta=h_theta**2, kappa=h_kappa,
+                             xi=h_xi, rho=h_rho)
+else:
+    model = black
+
 # =====================================================================
 # Price
 # =====================================================================
-paths = simulate_paths(schedule, spot, vol, decrement, n_paths)
-res = price(schedule, spot, vol, decrement, spread, deal,
+paths = simulate_paths(schedule, spot, model, decrement, n_paths)
+res = price(schedule, spot, model, decrement, spread, deal,
             n_paths=n_paths, paths=paths)
 
 st.title("Autocallable Structurer")
-lead(f"{deal.describe()} on {underlying}. Fair value from "
-     f"{n_paths:,} simulated paths, and the gross structuring margin "
-     "that follows from it.")
+lead(f"{deal.describe()} on {underlying}. Priced under "
+     f"{model.describe()}, {n_paths:,} simulated paths, and the gross "
+     "structuring margin that follows.")
 
-tags = deal.features()
+tags = deal.features() + [model.label]
 if tags:
     st.markdown("<div class='tagrow'>"
                 + "".join(f"<span class='tag'>{t}</span>" for t in tags)
@@ -313,8 +366,9 @@ if not res.passes_floor:
         "product lever — coupon, barrier, trigger, maturity or issue "
         "price — rather than the volatility assumption.")
 
-t_product, t_pricing, t_mc, t_vol = st.tabs(
-    ["Structure", "Pricing", "Monte Carlo", "Volatility risk"])
+t_product, t_pricing, t_mc, t_vol, t_model = st.tabs(
+    ["Structure", "Pricing", "Monte Carlo", "Volatility risk",
+     "Model risk"])
 
 # ---------------------------------------------------------------------
 with t_product:
@@ -513,13 +567,26 @@ with t_mc:
 # ---------------------------------------------------------------------
 with t_vol:
     st.subheader("Repricing risk between trade and issue")
-    grid = np.round(np.arange(max(0.06, vol - 0.03), vol + 0.0301, 0.005), 4)
-    rows = [{"vol": float(v), **{
-        k: getattr(price(schedule, spot, v, decrement, spread, deal,
-                         n_paths=n_paths), k)
-        for k in ("margin_pct", "fair_value")}} for v in grid]
-    rows = [{"vol": r["vol"], "margin": r["margin_pct"],
-             "fair_value": r["fair_value"]} for r in rows]
+    step = 0.005 if model_name == "Black, flat" else 0.01
+    grid = np.round(np.arange(max(0.06, vol - 0.03), vol + 0.0301, step), 4)
+    sweep_paths = n_paths if model_name == "Black, flat" else min(n_paths,
+                                                                 20_000)
+
+    def shifted(v):
+        """Same model, moved to a new volatility level."""
+        if model_name == "Black, flat":
+            return BlackParams(v)
+        k = (v / vol) ** 2
+        return HestonParams(v0=model.v0 * k, theta=model.theta * k,
+                            kappa=model.kappa,
+                            xi=model.xi * float(np.sqrt(k)), rho=model.rho)
+
+    rows = []
+    for v in grid:
+        r = price(schedule, spot, shifted(float(v)), decrement, spread,
+                  deal, n_paths=sweep_paths)
+        rows.append({"vol": float(v), "margin": r.margin_pct,
+                     "fair_value": r.fair_value})
 
     st.altair_chart(charts.vol_sensitivity(rows, deal.margin_floor),
                     use_container_width=True)
@@ -552,7 +619,95 @@ with t_vol:
             "timing, not a reason to adopt whichever volatility clears "
             "the floor.")
 
+# ---------------------------------------------------------------------
+with t_model:
+    st.subheader("What the volatility model is worth")
+    lead("An autocallable holder is short a down-and-in put struck at "
+         "the capital barrier, so the price is largely a statement "
+         "about the left tail. A flat volatility gives every strike the "
+         "same number and has no skew at all — which is why the model "
+         "choice is not a detail here.")
+
+    with st.spinner("Pricing under both models…"):
+        cmp_paths = min(n_paths, 50_000)
+        rb = price(schedule, spot, black, decrement, spread, deal,
+                   n_paths=cmp_paths)
+        h_ref = calibrated_heston(schedule, spot, decrement, vol,
+                                  0.18, 1.5, 0.55, -0.70)
+        rh = price(schedule, spot, h_ref, decrement, spread, deal,
+                   n_paths=cmp_paths)
+
+    cards([
+        ("Black, flat", f"{rb.margin_pct:.2%}", "no skew", ""),
+        ("Heston", f"{rh.margin_pct:.2%}", "same ATM vol", ""),
+        ("Model gap", f"{(rh.margin_pct - rb.margin_pct)*1e4:+,.0f} bp",
+         "skew and curvature", ""),
+        ("Margin floor", f"{deal.margin_floor:.2%}", "desk minimum", ""),
+    ])
+
+    st.dataframe(
+        pd.DataFrame({
+            "Model": ["Black, flat", "Heston, ATM-matched"],
+            "Fair value": [f"{rb.fair_value:,.2f}", f"{rh.fair_value:,.2f}"],
+            "Gross margin": [f"{rb.margin_pct:.2%}", f"{rh.margin_pct:.2%}"],
+            "Early redemption": [f"{rb.prob_autocall:.1%}",
+                                 f"{rh.prob_autocall:.1%}"],
+            "Capital loss": [f"{rb.prob_capital_loss:.1%}",
+                             f"{rh.prob_capital_loss:.1%}"],
+            "Coupons paid": [f"{rb.avg_coupons_paid:.1f}",
+                             f"{rh.avg_coupons_paid:.1f}"],
+        }),
+        hide_index=True, use_container_width=True)
+
+    note("Both models are set to the same at-the-money volatility. "
+         "Without that step the comparison would mix two different "
+         "things — the level of volatility and the shape of the smile — "
+         "and only the second is the question.")
+
+    st.subheader("Where the gap comes from")
+    lead("Correlation between spot and volatility is what creates skew. "
+         "Sweeping it, with the ATM level held fixed, separates the "
+         "skew effect from the curvature that vol-of-vol alone produces.")
+
+    with st.spinner("Sweeping correlation…"):
+        sweep = []
+        for rho in (0.0, -0.3, -0.5, -0.7, -0.9):
+            p = calibrated_heston(schedule, spot, decrement, vol,
+                                  0.18, 1.5, 0.55, rho)
+            r = price(schedule, spot, p, decrement, spread, deal,
+                      n_paths=min(n_paths, 20_000))
+            sweep.append({"rho": rho, "margin": r.margin_pct,
+                          "gap": (r.margin_pct - rb.margin_pct) * 1e4,
+                          "call": r.prob_autocall,
+                          "loss": r.prob_capital_loss})
+
+    st.dataframe(
+        pd.DataFrame({
+            "Correlation": [f"{r['rho']:+.1f}" for r in sweep],
+            "Gross margin": [f"{r['margin']:.2%}" for r in sweep],
+            "Versus flat Black": [f"{r['gap']:+,.0f} bp" for r in sweep],
+            "Early redemption": [f"{r['call']:.1%}" for r in sweep],
+            "Capital loss": [f"{r['loss']:.1%}" for r in sweep],
+        }),
+        hide_index=True, use_container_width=True)
+
+    st.warning(
+        "Read this as model risk, not as a better price. None of these "
+        "correlations is calibrated to anything — there is no surface "
+        "in this project to fit. The finding is the size of the spread: "
+        "the model moves the margin by more than the floor itself, and "
+        "the direction depends on a parameter the flat model never "
+        "makes you state."
+    )
+
+    note("Production autocall books go further again, to "
+         "local-stochastic volatility. Local vol alone reprices today's "
+         "smile but misstates forward skew; stochastic vol alone does "
+         "not reprice the smile exactly. Heston is the step that makes "
+         "the question visible, not the end of it.")
+
 st.divider()
-note("Flat Black volatility, no skew; lognormal, no jumps; a flat "
-     "deterministic credit spread; no dynamic hedging cost, repo or "
-     "market friction. Figures are indicative and not a quotation.")
+note("Lognormal or Heston dynamics, no jumps; Heston parameterised "
+     "rather than calibrated; a flat deterministic credit spread; no "
+     "dynamic hedging cost, repo or market friction. Figures are "
+     "indicative and not a quotation.")

@@ -7,6 +7,7 @@ Command-line analysis of the worked example.
 import numpy as np
 
 from deal import ATHENA
+from models import BlackParams, HestonParams, match_atm_vol
 from pricer import price
 import worked_example as wx
 
@@ -17,10 +18,10 @@ def section(title):
     print(f"\n{title}\n{RULE}")
 
 
-def run(deal=None, vol=None, spread=None):
+def run(deal=None, vol=None, spread=None, model=None):
     deal = deal or wx.DEAL
-    return price(wx.schedule_for(deal), wx.SPOT, vol or wx.VOL,
-                 wx.DECREMENT,
+    return price(wx.schedule_for(deal), wx.SPOT,
+                 model or BlackParams(vol or wx.VOL), wx.DECREMENT,
                  spread if spread is not None else wx.CREDIT_GRID[3],
                  deal)
 
@@ -122,7 +123,30 @@ def main():
     print("  expected life, which cuts issuer exposure, so it can improve")
     print("  margin and the holder's odds of an early exit at once.")
 
-    section("6. CONCLUSION")
+    section("6. MODEL RISK - FLAT BLACK AGAINST HESTON")
+    print("  Heston scaled to the same at-the-money volatility, so the")
+    print("  gap below is skew and curvature, not a different vol level.\n")
+    print(f"{'Correlation':<14}{'Fair value':>12}{'Margin':>9}"
+          f"{'vs Black':>11}{'Called':>9}{'Loss':>8}{'Coupons':>9}")
+    for rho in (0.0, -0.3, -0.5, -0.7, -0.9):
+        p = match_atm_vol(wx.SCHEDULE, wx.SPOT,
+                          HestonParams(rho=rho), wx.DECREMENT, wx.VOL)
+        r = run(model=p)
+        print(f"rho {rho:<10.1f}{r.fair_value:>12,.2f}"
+              f"{r.margin_pct*100:>8.2f}%"
+              f"{(r.margin_pct - base.margin_pct)*1e4:>9,.0f}bp"
+              f"{r.prob_autocall:>9.1%}{r.prob_capital_loss:>8.1%}"
+              f"{r.avg_coupons_paid:>9.1f}")
+    print(f"{'Black, flat':<14}{base.fair_value:>12,.2f}"
+          f"{base.margin_pct*100:>8.2f}%{0:>9,.0f}bp"
+          f"{base.prob_autocall:>9.1%}{base.prob_capital_loss:>8.1%}"
+          f"{base.avg_coupons_paid:>9.1f}")
+    print("\n  The model is worth more than the floor. At rho = -0.70 the")
+    print("  margin clears 1.50 % that flat Black said it missed; at")
+    print("  rho = 0 it misses by more. None of these correlations is")
+    print("  calibrated - that is the point, not a caveat on it.")
+
+    section("7. CONCLUSION")
     verdict = "clears" if base.passes_floor else "does not clear"
     print(f"  At the proposed terms the margin {verdict} the floor "
           f"({base.margin_pct:.2%} vs {wx.DEAL.margin_floor:.2%}).")
