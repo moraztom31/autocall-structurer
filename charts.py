@@ -11,7 +11,15 @@ Two palettes, one per theme. The dark set is chosen against the dark
 surface rather than flipped from the light one: a hue that reads well
 on white is usually too dark on near-black, and flipping it quietly
 breaks both the contrast floor and the separation a colour-blind reader
-depends on. Both sets pass the same six checks on their own surface.
+depends on.
+
+The dark blue sits a little above the usual lightness band, and that is
+deliberate. Blue reads darker than red or orange at equal lightness, so
+on a near-black surface a band-compliant blue sinks into the background
+while its red partner stays crisp - the two series end up carrying
+visibly different weight for no reason in the data. Both hues are
+lifted together, which keeps them matched to each other and clear of
+the contrast floor on this surface.
 """
 
 import altair as alt
@@ -30,8 +38,8 @@ LIGHT = {
 }
 
 DARK = {
-    "protected": "#3F84E4",
-    "at_risk": "#DB724F",
+    "protected": "#5E9AEE",
+    "at_risk": "#E5805C",
     "neutral": "#8C929C",
     "grid": "#2A2D33",
     "panel": "#15171B",

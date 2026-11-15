@@ -44,8 +44,8 @@ charts.set_theme(THEME)
 if THEME == "dark":
     C = {"ink": "#E4E8ED", "muted": "#9BA1AA", "faint": "#7D838C",
          "line": "#2A2D33", "panel": "#15171B", "card": "#15171B",
-         "good_bd": "#2E4A72", "good_bg": "#131B27", "good_tx": "#7FB0F0",
-         "bad_bd": "#6B3A2B", "bad_bg": "#1E1512", "bad_tx": "#E89272",
+         "good_bd": "#2E4A72", "good_bg": "#131B27", "good_tx": "#8FB6F2",
+         "bad_bd": "#6B3A2B", "bad_bg": "#1E1512", "bad_tx": "#EE9A7C",
          "tag_bg": "#17202D", "tag_tx": "#8FB6EC", "tag_bd": "#28374B"}
 else:
     C = {"ink": "#1F2328", "muted": "#5A6069", "faint": "#7A8089",
