@@ -1,7 +1,12 @@
+# Dark by default. Visitors can still switch in the app menu, and the
+# charts are drawn to read on either background, so nothing breaks.
 [theme]
 base = "dark"
-primaryColor = "#5E9AEE"
+primaryColor = "#5091E6"
 backgroundColor = "#101216"
 secondaryBackgroundColor = "#15171B"
 textColor = "#D5DAE1"
 font = "sans serif"
+
+[server]
+headless = true
