@@ -6,7 +6,7 @@ Command-line analysis of the worked example.
 
 import numpy as np
 
-from deal import Deal
+from deal import ATHENA
 from pricer import price
 import worked_example as wx
 
@@ -18,9 +18,11 @@ def section(title):
 
 
 def run(deal=None, vol=None, spread=None):
-    return price(wx.SCHEDULE, wx.SPOT, vol or wx.VOL, wx.DECREMENT,
+    deal = deal or wx.DEAL
+    return price(wx.schedule_for(deal), wx.SPOT, vol or wx.VOL,
+                 wx.DECREMENT,
                  spread if spread is not None else wx.CREDIT_GRID[3],
-                 deal or wx.DEAL)
+                 deal)
 
 
 def main():
@@ -76,11 +78,12 @@ def main():
     print("  Breakeven = the value that brings the margin back to the floor\n")
     levers = [
         ("Coupon", "6.00% -> 5.75% p.a.",
-         Deal(**{**wx.DEAL.__dict__, "coupon_rate_pa": 0.0575})),
+         wx.DEAL.with_(coupon_rate_pa=0.0575)),
         ("Coupon barrier", "60% -> 63.6%",
-         Deal(**{**wx.DEAL.__dict__, "coupon_barrier": 0.636})),
+         wx.DEAL.with_(coupon_barrier=0.636)),
         ("Capital barrier", "60% -> 62.1%",
-         Deal(**{**wx.DEAL.__dict__, "capital_barrier": 0.621})),
+         wx.DEAL.with_(capital_barrier=0.621)),
+
     ]
     for name, move, d in levers:
         r = run(deal=d)
@@ -89,8 +92,37 @@ def main():
     print("\n  Lowering the coupon or capital barrier makes the note more")
     print("  generous and therefore more expensive: those levers cost")
     print("  margin. Raising them is what recovers it.")
+    print()
+    print("  The step-down trigger has no breakeven: its effect on margin")
+    print("  turns over. A mild step-down shortens expected life and helps")
+    print("  (best around 5% p.a., at 1.13%), but past that the call")
+    print("  becomes near certain, and redeeming at par early is itself")
+    print("  expensive. It cannot carry the revision on its own.")
 
-    section("5. CONCLUSION")
+    section("5. STRUCTURE VARIANTS - SAME SNAPSHOT")
+    print(f"{'Variant':<30}{'Fair value':>12}{'Margin':>9}"
+          f"{'Called':>9}{'Life':>8}{'Coupons':>9}")
+    variants = [
+        ("Phoenix, no memory (base)", wx.DEAL),
+        ("Memory coupons", wx.DEAL.with_(coupon_memory=True)),
+        ("Step-down 5% p.a.", wx.DEAL.with_(autocall_stepdown_pa=0.05)),
+        ("Step-down + memory",
+         wx.DEAL.with_(autocall_stepdown_pa=0.05, coupon_memory=True)),
+        ("Airbag struck at 60%",
+         wx.DEAL.with_(airbag=True, airbag_strike=0.60)),
+        ("Athena", wx.DEAL.with_(style=ATHENA)),
+    ]
+    for name, d in variants:
+        r = run(deal=d)
+        print(f"  {name:<28}{r.fair_value:>12,.2f}"
+              f"{r.margin_pct*100:>8.2f}%{r.prob_autocall:>9.1%}"
+              f"{r.expected_life:>7.2f}y{r.avg_coupons_paid:>9.1f}")
+    print("\n  Memory and the airbag both make the note more generous and")
+    print("  cost margin. The step-down is the exception: it shortens")
+    print("  expected life, which cuts issuer exposure, so it can improve")
+    print("  margin and the holder's odds of an early exit at once.")
+
+    section("6. CONCLUSION")
     verdict = "clears" if base.passes_floor else "does not clear"
     print(f"  At the proposed terms the margin {verdict} the floor "
           f"({base.margin_pct:.2%} vs {wx.DEAL.margin_floor:.2%}).")

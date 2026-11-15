@@ -62,7 +62,18 @@ TABLE = [
     ("2031-12-15", 5.0486, 0.85815, False),   # final valuation
 ]
 
-SCHEDULE = schedule_from_table(TABLE)
+SCHEDULE = schedule_from_table(TABLE, DEAL)
+
+
+def schedule_for(deal):
+    """
+    The locked grid, with autocall triggers recomputed for a given deal.
+
+    The dates and discount factors never move - that is the point of a
+    frozen snapshot. Only the trigger levels depend on the terms, so a
+    step-down can be tested without touching the curve.
+    """
+    return schedule_from_table(TABLE, deal)
 
 # ---------------------------------------------------------------------
 # ALM credit grid: issuer funding spread over the risk-free curve

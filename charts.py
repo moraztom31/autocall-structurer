@@ -33,33 +33,41 @@ def _base(df, height=320):
     )
 
 
-def payoff_curve(deal, payoff_fn, height=340):
+def payoff_curve(deal, payoff_fn, n_obs=None, height=340):
     """
     Redemption at final valuation against the final index level.
 
     Drawn for a note that was never called, which is the only path on
-    which the capital barrier is ever tested. The curve is deliberately
-    broken at the barrier: the drop there is a cliff, not a slope, and
-    joining the two segments would draw a transition that does not exist.
+    which the capital barrier is ever tested.
+
+    The two sides of the barrier are drawn as separate segments. Without
+    an airbag they do not meet, and that gap is the point: the drop is a
+    cliff, not a slope, and a line joining them would draw a transition
+    that does not exist. With an airbag struck at or below the barrier
+    the segments meet on their own, which is exactly what the feature
+    buys.
     """
     barrier = deal.capital_barrier
 
-    below = np.linspace(0.0, barrier - 1e-6, 160)
-    above = np.linspace(barrier, 1.60, 160)
+    below = np.linspace(0.0, barrier - 1e-6, 180)
+    above = np.linspace(barrier, 1.60, 180)
 
     df = pd.concat([
-        pd.DataFrame({"level": below, "payout": payoff_fn(deal, below),
+        pd.DataFrame({"level": below,
+                      "payout": payoff_fn(deal, below, n_obs),
                       "region": "Capital at risk"}),
-        pd.DataFrame({"level": above, "payout": payoff_fn(deal, above),
+        pd.DataFrame({"level": above,
+                      "payout": payoff_fn(deal, above, n_obs),
                       "region": "Capital returned"}),
     ])
     df["level_pct"] = df["level"] * 100
+    y_top = float(df["payout"].max()) * 1.12
 
     line = alt.Chart(df).mark_line(strokeWidth=2.5).encode(
         x=alt.X("level_pct:Q", title="Final index level (% of initial)",
                 scale=alt.Scale(domain=[0, 160]), axis=_AXIS),
         y=alt.Y("payout:Q", title="Redemption per 1,000 note",
-                scale=alt.Scale(domain=[0, 1150]), axis=_AXIS),
+                scale=alt.Scale(domain=[0, y_top]), axis=_AXIS),
         color=alt.Color("region:N", title=None,
                         scale=alt.Scale(domain=["Capital at risk",
                                                 "Capital returned"],
@@ -75,7 +83,7 @@ def payoff_curve(deal, payoff_fn, height=340):
     ).encode(x="x:Q")
 
     label = alt.Chart(pd.DataFrame({
-        "x": [barrier * 100], "y": [1100],
+        "x": [barrier * 100], "y": [y_top * 0.96],
         "t": [f"Capital barrier {barrier:.0%}"],
     })).mark_text(align="left", dx=7, fontSize=11, color=NEUTRAL).encode(
         x="x:Q", y="y:Q", text="t:N")
@@ -235,3 +243,33 @@ def vol_sensitivity(rows, floor, height=300):
 
     return (floor_rule + line + floor_text).properties(
         height=height).configure_view(strokeWidth=0)
+
+
+def stepdown_schedule(schedule, height=240):
+    """
+    Autocall trigger at each call date, where it steps down over time.
+
+    Worth drawing only when the trigger actually moves: a flat line adds
+    nothing a sentence could not say.
+    """
+    times, levels = schedule.call_levels()
+    df = pd.DataFrame({"t": times, "level": levels * 100})
+
+    line = alt.Chart(df).mark_line(
+        strokeWidth=2.5, color=PROTECTED, interpolate="step-after",
+        point=alt.OverlayMarkDef(size=70, color=PROTECTED),
+    ).encode(
+        x=alt.X("t:Q", title="Years from trade date", axis=_AXIS),
+        y=alt.Y("level:Q", title="Autocall trigger (% of initial)",
+                scale=alt.Scale(zero=False), axis=_AXIS),
+        tooltip=[alt.Tooltip("t:Q", title="Year", format=".2f"),
+                 alt.Tooltip("level:Q", title="Trigger", format=".1f")],
+    )
+
+    labels = alt.Chart(df).mark_text(
+        dy=-12, fontSize=11, color="#5A6069"
+    ).encode(x="t:Q", y="level:Q",
+             text=alt.Text("level:Q", format=".0f"))
+
+    return (line + labels).properties(height=height).configure_view(
+        strokeWidth=0)

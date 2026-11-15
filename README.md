@@ -1,7 +1,7 @@
-# Phoenix Autocallable — Monte Carlo Pricer
+# Autocallable Structurer
 
-Monte Carlo pricer for **Phoenix autocallable notes**, with a Streamlit
-interface. It computes fair value, derives the issuer's **gross structuring
+Monte Carlo pricer and structuring tool for **autocallable notes**, with a
+Streamlit interface. It computes fair value, derives the issuer's **gross structuring
 margin**, and measures how that margin responds to volatility and to each
 product lever.
 
@@ -13,6 +13,19 @@ Two modes:
 | **Note builder** | Pick an index, set the terms, price any Phoenix |
 
 ---
+
+## Structures supported
+
+| | |
+|---|---|
+| **Phoenix** | coupon barrier below the autocall level, coupons paid as they fall due |
+| **Athena** | one barrier, coupons accrued and paid on redemption |
+| **Memory coupons** | missed coupons recovered when the barrier is next met |
+| **Step-down trigger** | autocall level falls each year, so the note gets easier to call |
+| **Airbag** | below the barrier, loss measured from a strike rather than the initial level |
+
+Maturity, coupon frequency, autocall frequency and first call date are all
+free, so the schedule is built rather than assumed.
 
 ## The product
 
@@ -150,6 +163,28 @@ Lowering the coupon or capital barrier makes the note **more** generous and
 therefore more expensive to manufacture: those moves cost margin. Raising them
 is what recovers it.
 
+### Structure variants on the same snapshot
+
+| Variant | Fair value | Margin | Called | Life | Coupons |
+|---|---|---|---|---|---|
+| Phoenix, no memory | 990.97 | 0.90 % | 60.3 % | 2.94 y | 10.2 |
+| Memory coupons | 995.77 | 0.42 % | 60.3 % | 2.94 y | 10.6 |
+| Step-down 5 % p.a. | 988.74 | 1.13 % | 70.5 % | 2.70 y | 9.3 |
+| Airbag struck at 60 % | 1 032.38 | −3.24 % | 60.3 % | 2.94 y | 10.2 |
+| Athena | 903.15 | 9.69 % | 60.3 % | 2.94 y | 4.1 |
+
+Memory and the airbag both make the note more generous and cost margin. The
+airbag is the most expensive thing this structure can buy: struck at the
+barrier it removes the cliff entirely, and the cliff is precisely what the
+coupon is paid for.
+
+The **step-down is the exception**, and the one lever that moves both sides
+the same way: it shortens expected life, which cuts issuer exposure, while
+also improving the holder's odds of an early exit. Its effect on margin is
+not monotonic, though — it peaks around 5 % p.a. at 1.13 % and falls away
+after, because once the call is near certain, redeeming at par early is itself
+expensive. It cannot carry a revision on its own.
+
 ---
 
 ## Note builder
@@ -205,17 +240,26 @@ Any structure, through the schedule builder:
 from deal import Deal, build_schedule
 from pricer import price
 
-deal = Deal(maturity_years=3, coupons_per_year=2, coupon_rate_pa=0.08,
-            coupon_barrier=0.70, autocall_barrier=0.95)
+deal = Deal(style="phoenix", maturity_years=3, coupons_per_year=2,
+            coupon_rate_pa=0.08, coupon_barrier=0.70, coupon_memory=True,
+            autocall_barrier=1.00, autocall_stepdown_pa=0.05,
+            capital_barrier=0.60, airbag=True, airbag_strike=0.60)
 schedule = build_schedule(deal, flat_rate=0.03)
 res = price(schedule, spot=5000, vol=0.20, decrement=0.0,
             credit_spread=0.002, deal=deal)
 ```
 
+`Deal.with_()` returns a copy with some terms replaced, which is how the
+lever tests are run:
+
+```python
+revised = deal.with_(coupon_rate_pa=0.0575)
+```
+
 ### Files
 
 ```
-deal.py             deal terms, observation schedule construction
+deal.py             deal terms, structure variants, schedule construction
 pricer.py           path generation and the pricing engine
 market.py           live quotes, realised volatility, offline fallback
 worked_example.py   the frozen snapshot and its funding grid
