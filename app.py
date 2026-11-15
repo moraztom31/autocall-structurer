@@ -8,23 +8,17 @@ les curseurs servent a l'analyse de sensibilite, pas a faire passer
 la marge en bougeant les hypotheses de marche.
 """
 
-import sys
-from pathlib import Path
-
-import numpy as np
 import pandas as pd
 import streamlit as st
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
-
-from market_data import (  # noqa: E402
+from market_data import (
     CREDIT_GRID,
     DATES,
     MARGIN_FLOOR,
     S0,
     VOL_BASE,
 )
-from pricer import price, simulate_paths  # noqa: E402
+from pricer import price, simulate_paths
 
 st.set_page_config(page_title="Phoenix Autocall Pricer", layout="wide")
 

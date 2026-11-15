@@ -144,7 +144,7 @@ l'améliorer il faut les **relever**.
 ```bash
 pip install -r requirements.txt
 
-python src/main.py        # tableau de résultats complet
+python main.py            # tableau de résultats complet
 streamlit run app.py      # interface interactive
 ```
 
@@ -163,10 +163,10 @@ revised = price(expected_life=3, coupon_rate=0.014375)
 ### Structure
 
 ```
-src/market_data.py   paramètres, calendrier d'observation, courbe, grille de crédit
-src/pricer.py        génération des chemins et moteur de pricing
-src/main.py          analyse complète en ligne de commande
-app.py               interface Streamlit
+market_data.py   paramètres, calendrier d'observation, courbe, grille de crédit
+pricer.py        génération des chemins et moteur de pricing
+main.py          analyse complète en ligne de commande
+app.py           interface Streamlit
 ```
 
 ---
