@@ -218,26 +218,66 @@ class LSVParams:
         return np.interp(k, self.ks, row)
 
 
-def calibrate_lsv(schedule, spot, heston, local, decrement,
-                  n_paths=60_000, steps_per_year=104, n_bins=49,
-                  k_lo=-1.3, k_hi=0.9, seed=11):
+def _conditional_variance(k, v, centres, bandwidth, fallback):
     """
-    Leverage function by the binned conditional-expectation method.
+    E[v | k] by Nadaraya-Watson regression.
+
+    Hard bins throw information away: a particle contributes to one bin
+    and nothing to its neighbours, so the wings - where particles are
+    scarce exactly when the leverage there matters most - are estimated
+    from a handful of paths. A Gaussian kernel lets every particle
+    contribute to every grid point in proportion to how close it is,
+    which is the same estimator with a smooth window instead of a square
+    one.
+
+    Where the total kernel weight is still too thin to mean anything,
+    the unconditional mean variance is used rather than a neighbour's
+    noisy value - a known approximation beats an extrapolated accident.
+
+    The bandwidth must track the particle cloud, not the output grid.
+    Early on the paths are packed tightly around the money, and a window
+    sized for the grid spans the whole distribution - it would smooth
+    the leverage flat exactly where its shape matters. Scaling it to the
+    realised dispersion keeps the window proportional to what is
+    actually there to average over.
+    """
+    d = (centres[:, None] - k[None, :]) / bandwidth
+    w = np.exp(-0.5 * d * d)
+
+    mass = w.sum(axis=1)
+    num = w @ v
+
+    # effective sample size: how many particles a grid point really has
+    ess = mass**2 / np.maximum((w**2).sum(axis=1), 1e-300)
+    solid = (mass > 1e-8) & (ess >= 30.0)
+
+    out = np.where(mass > 1e-8, num / np.maximum(mass, 1e-300), fallback)
+    return np.where(solid, out, fallback)
+
+
+def calibrate_lsv(schedule, spot, heston, local, decrement,
+                  n_paths=100_000, steps_per_year=104, n_grid=61,
+                  k_lo=-1.3, k_hi=0.9, seed=11, bandwidth=None,
+                  short_refine=4):
+    """
+    Leverage function by kernel-weighted conditional expectation.
 
     The model reprices the vanilla surface when
 
         L(S, t)^2 * E[ v_t | S_t = S ] = sigma_loc(S, t)^2
 
-    which cannot be solved in closed form because the conditional
-    expectation depends on the leverage already applied at earlier
-    times. So it is bootstrapped forward: at each step the paths are
-    binned by log-moneyness, the conditional mean variance is read off
-    the particles in each bin, and the leverage for that step follows.
-    Paths then advance using it, and the next step sees the result.
+    which cannot be solved in closed form: the conditional expectation
+    depends on the leverage already applied at earlier times. So it is
+    bootstrapped forward - at each step the conditional mean variance is
+    estimated from the particles, the leverage follows, the paths
+    advance using it, and the next step sees the result.
 
-    Bins holding too few particles - the far wings early on, where
-    almost nothing has reached - are not estimated from noise; they
-    carry the nearest well-populated value instead.
+    Two things the simple version gets wrong. Hard bins estimate the
+    wings from very few particles; a kernel uses all of them, weighted.
+    And a uniform time grid is far too coarse near zero, where both the
+    local volatility and the particle distribution change fastest -
+    `short_refine` subdivides the opening interval, which is where the
+    fit was previously worst.
 
     Returns an LSVParams.
     """
@@ -247,12 +287,20 @@ def calibrate_lsv(schedule, spot, heston, local, decrement,
                              heston.xi, heston.rho)
 
     grid, _ = models._time_grid(schedule, steps_per_year)
+    if short_refine > 1:
+        first = grid[grid <= schedule.times[0]]
+        refined = np.unique(np.concatenate([
+            np.linspace(first[i], first[i + 1], short_refine + 1)
+            for i in range(len(first) - 1)]))
+        grid = np.unique(np.concatenate([refined,
+                                         grid[grid > schedule.times[0]]]))
+
     dts = np.diff(grid)
     rates = models._step_rates(schedule, grid)
     fwd_log = models._forward_curve(schedule, grid, decrement)
 
-    edges = np.linspace(k_lo, k_hi, n_bins + 1)
-    centres = 0.5 * (edges[1:] + edges[:-1])
+    centres = np.linspace(k_lo, k_hi, n_grid)
+    bw_factor = bandwidth or 0.20
 
     rng = np.random.default_rng(seed)
     half = n_paths // 2
@@ -261,31 +309,20 @@ def calibrate_lsv(schedule, spot, heston, local, decrement,
     v = np.full(n, heston.v0)
     x = np.full(n, np.log(spot))
 
-    # at t=0 every path sits at the money, so the conditional variance
-    # is just v0 and the leverage follows directly
     t0 = float(local.ts[0])
     ts_out = [0.0]
     lev_rows = [np.clip(local.vol(centres, t0)
-                        / max(np.sqrt(heston.v0), 1e-8), 0.1, 6.0)]
+                        / max(np.sqrt(heston.v0), 1e-8), 0.05, 8.0)]
 
     for step, dt in enumerate(dts, start=1):
         t = grid[step - 1]
         k = x - (np.log(spot) + fwd_log[step - 1])
 
-        # conditional mean variance per bin, from the particles there
-        idx = np.clip(np.digitize(k, edges) - 1, 0, n_bins - 1)
-        counts = np.bincount(idx, minlength=n_bins)
-        sums = np.bincount(idx, weights=v, minlength=n_bins)
-        enough = counts >= 50
-        cond = np.where(enough, sums / np.maximum(counts, 1), np.nan)
-        if enough.any():
-            cond = np.interp(centres, centres[enough], cond[enough])
-        else:
-            cond = np.full(n_bins, max(heston.v0, 1e-8))
-
-        sig_loc = local.vol(centres, t)
-        lev_row = sig_loc / np.sqrt(np.maximum(cond, 1e-10))
-        lev_row = np.clip(lev_row, 0.1, 6.0)
+        bw = max(bw_factor * float(k.std()), 0.01)
+        cond = _conditional_variance(k, v, centres, bw,
+                                     fallback=float(v.mean()))
+        lev_row = np.clip(local.vol(centres, t)
+                          / np.sqrt(np.maximum(cond, 1e-10)), 0.05, 8.0)
 
         ts_out.append(t)
         lev_rows.append(lev_row)

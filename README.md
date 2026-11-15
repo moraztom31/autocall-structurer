@@ -113,13 +113,19 @@ expectation.
 | Characteristic-function pricer vs Monte Carlo | within MC error at every strike and maturity tested |
 | Heston calibration must recover known parameters | exact recovery from a synthetic surface, RMSE 0.000, 1.5 s |
 | Local vol must reprice its own surface | 0.06 vol points typical, 0.21 worst |
-| LSV must reprice its own surface | 0.15 vol points typical, 0.53 worst |
+| LSV must reprice its own surface | 0.10 vol points typical, 0.24 worst |
+| Forward recovered from noisy quotes | 0.0 bp, with 15 % of bids missing and 3 % crossed |
+| Calibration from a noisy synthetic chain | all five parameters to 3 decimals, RMSE 0.04 vol points |
 | Time-stepping convergence | stable by 52 steps/year for Heston, 104 for the surface models |
 
-The LSV fit is the weakest of the set and does not improve with more
-particles or finer steps, so the limit is the binned implementation rather
-than sampling — worst in the short-dated left wing, where fewest paths have
-arrived to average over.
+The LSV leverage is estimated by kernel-weighted conditional expectation
+rather than hard bins, with a bandwidth that scales with the realised
+dispersion of the particle cloud. Both choices matter: hard bins estimate the
+wings from a handful of paths, and a bandwidth sized for the output grid
+over-smooths the opening steps — where the cloud is still tightly packed —
+and flattens the leverage exactly where its shape carries the skew. A fixed
+bandwidth tested at 0.53 vol points worst-case; scaling it to the cloud
+brought that to 0.24.
 
 ### Calibration is well-conditioned where it matters
 
@@ -258,6 +264,42 @@ expensive. It cannot carry a revision on its own.
 
 ---
 
+## Calibrating to a listed surface
+
+```bash
+python calibrate_market.py SPY
+python calibrate_market.py QQQ --rate 0.025
+```
+
+Fetches a chain, cleans it, extracts the forward, fits Heston, and reports
+how well.
+
+**The forward comes from put-call parity, not from spot less a dividend
+estimate.** For European options `C(K) − P(K) = DF · (F − K)`, so the
+call-put difference is affine in strike. Regressing it across the liquid
+strikes recovers the forward the option market is actually trading —
+dividends and borrow included — rather than importing two guesses into every
+implied volatility, with the error landing hardest in the wings, which is
+where a barrier product is priced.
+
+Quotes are dropped when the bid is zero (nobody is buying, so the mid means
+nothing), when the relative spread exceeds 35 % (the mid carries less
+information than its own uncertainty), when the price is a tick or two (where
+rounding dominates), or when the strike sits outside the moneyness band the
+surface needs. Only out-of-the-money quotes are kept: the in-the-money side
+carries the same information by parity, with wider spreads and more stale
+prints.
+
+Validated end to end on synthetic chains built from known parameters and then
+degraded the way real ones are — 4 % bid-ask, 15 % of quotes with no bid, 3 %
+crossed and stale. The forward comes back to 0.0 bp and the five parameters
+to three decimals.
+
+Free feeds carry options for large ETFs far more reliably than for the
+indices themselves. SPY, QQQ and EZU usually work; `^STOXX50E` and `^GSPC`
+often return nothing. An ETF on the same underlying is a reasonable proxy for
+the shape of a surface, but its dividend and borrow are not the index's.
+
 ## Note builder
 
 Pick an index, set the terms, price it. Spot and price history are pulled
@@ -304,6 +346,7 @@ pip install -r requirements.txt
 
 python main.py          # full analysis of the worked example
 python model_study.py   # five models on one surface, and forward skew
+python calibrate_market.py SPY   # fit Heston to a listed chain
 streamlit run app.py    # interactive interface
 ```
 
@@ -356,7 +399,9 @@ calibrate.py        Heston characteristic function, Lewis integral, fitting
 surface.py          implied-vol surfaces, Dupire local vol, LSV leverage
 greeks.py           delta, gamma, vega, rho, theta under common random numbers
 pricer.py           path generation and the pricing engine
+option_chain.py     chain cleaning, put-call parity forwards, surface building
 model_study.py      the five-model comparison and forward-skew study
+calibrate_market.py fit Heston to a live listed chain
 market.py           live quotes, realised volatility, offline fallback
 worked_example.py   the frozen snapshot and its funding grid
 charts.py           payoff curve, path fan, distributions, sensitivity
@@ -368,14 +413,15 @@ app.py              Streamlit interface
 
 ## Limitations
 
-- **No market surface is fitted.** The calibrator is validated by recovering
-  known parameters from a synthetic surface; pointing it at a live option
-  chain is the obvious next step and is not done here. Every number quoted
-  under a skew is therefore model risk quantified, not a market price.
-- **The LSV leverage is binned, not particle-smoothed**, and fits its surface
-  to 0.5 vol points rather than the 0.1 a production calibration reaches.
-- **No discrete dividends, repo, or borrow**; carry is a single continuous
-  rate.
+- **The worked example is not calibrated to a market surface.** A decrement
+  index has almost no listed options, so its skew cannot be fitted directly;
+  desks proxy it from the parent index. The figures quoted under a skew are
+  therefore model risk quantified, not a market price. `calibrate_market.py`
+  fits a real chain for underlyings that have one.
+- **Heston has one skew shape per maturity**, which real surfaces often
+  exceed; a loose fit is reported rather than hidden.
+- **No discrete dividends, repo, or borrow** in the simulation; carry is a
+  single continuous rate, even though the chain's forward does reflect them.
 - **No dynamic hedging cost** — the Greeks are reported but no replication
   P&L is simulated against them.
 - **Flat deterministic credit spread**, applied as a uniform continuous bump.
