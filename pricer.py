@@ -150,7 +150,7 @@ def _redemption(paths, spot, deal, exit_idx, any_call):
 
 
 def price(schedule, spot, model, decrement, credit_spread,
-          deal=None, n_paths=50_000, seed=42, paths=None):
+          deal=None, n_paths=50_000, seed=42, paths=None, **sim_kw):
     """
     Price an autocallable note and return value, margin and diagnostics.
 
@@ -162,7 +162,7 @@ def price(schedule, spot, model, decrement, credit_spread,
 
     if paths is None:
         paths = simulate_paths(schedule, spot, model, decrement,
-                               n_paths, seed)
+                               n_paths, seed, **sim_kw)
 
     disc = schedule.df_note(credit_spread)
 

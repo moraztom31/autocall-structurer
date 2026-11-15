@@ -73,12 +73,15 @@ than adding to it.
 
 ## Volatility models
 
-Two dynamics, same engine.
+Five dynamics, one engine.
 
 | | |
 |---|---|
 | **Black, flat** | one sigma for every strike and maturity — no skew at all |
-| **Heston** | stochastic volatility, simulated with Andersen's QE scheme |
+| **Heston** | stochastic volatility, Andersen QE scheme |
+| **Bates** | Heston plus compensated lognormal jumps |
+| **Local vol** | Dupire, read off the surface — reprices every vanilla exactly |
+| **LSV** | leverage × stochastic variance, leverage bootstrapped by the particle method |
 
 An autocallable holder is **short a down-and-in put** struck at the capital
 barrier, so its price is largely a statement about the left tail — exactly
@@ -99,14 +102,42 @@ skew effect alone.
 
 ### Validation
 
-- With `xi → 0` and `v0 = theta`, Heston reproduces Black path for path —
-  means and log-return dispersions agree to three decimals at 1Y, 3Y and 5Y.
-- The discounted forward is a martingale under both: `E[S_T]` matches
-  `S₀ · DF⁻¹ · e^(−qT)` to within 0.1 % across all 20 observation dates.
-- The generated smile is downward-sloping and realistic: 19.7 % implied at
-  the 60 % strike against 14.6 % at the money, 5Y.
-- Time-stepping converges by 52 steps per year; finer grids move the margin
-  by less than Monte Carlo noise.
+Every model is checked against something it must satisfy, not against
+expectation.
+
+| Check | Result |
+|---|---|
+| Heston with `xi → 0`, `v0 = theta` must reproduce Black | means and log dispersions agree to 3 decimals at 1Y, 3Y, 5Y |
+| Bates with `lam = 0` must reproduce Heston | identical to the cent |
+| Discounted forward must be a martingale | within 0.1 % across all 20 dates, all models |
+| Characteristic-function pricer vs Monte Carlo | within MC error at every strike and maturity tested |
+| Heston calibration must recover known parameters | exact recovery from a synthetic surface, RMSE 0.000, 1.5 s |
+| Local vol must reprice its own surface | 0.06 vol points typical, 0.21 worst |
+| LSV must reprice its own surface | 0.15 vol points typical, 0.53 worst |
+| Time-stepping convergence | stable by 52 steps/year for Heston, 104 for the surface models |
+
+The LSV fit is the weakest of the set and does not improve with more
+particles or finer steps, so the limit is the binned implementation rather
+than sampling — worst in the short-dated left wing, where fewest paths have
+arrived to average over.
+
+### Calibration is well-conditioned where it matters
+
+Fitting Heston to a surface with realistic bid-ask noise added:
+
+| Noise added | Fit RMSE | kappa recovered | xi | rho |
+|---|---|---|---|---|
+| none | 0.000 pt | 1.800 | 0.620 | −0.720 |
+| 0.25 pt | 0.244 pt | 1.764 | 0.616 | −0.722 |
+| 0.50 pt | 0.493 pt | 2.234 | 0.680 | −0.740 |
+| 1.00 pt | 0.820 pt | 1.147 | 0.632 | −0.662 |
+
+*(true values: kappa 1.800, xi 0.620, rho −0.720)*
+
+**kappa is poorly identified and rho is not.** Mean reversion wanders by a
+factor of two under noise a real surface would carry, while the correlation —
+the parameter the note price actually depends on — stays within 0.06. The
+badly-determined parameter is not the one the conclusion rests on.
 
 ## Method
 
@@ -272,6 +303,7 @@ app falls back to manual entry rather than failing.
 pip install -r requirements.txt
 
 python main.py          # full analysis of the worked example
+python model_study.py   # five models on one surface, and forward skew
 streamlit run app.py    # interactive interface
 ```
 
@@ -319,8 +351,12 @@ revised = deal.with_(coupon_rate_pa=0.0575)
 
 ```
 deal.py             deal terms, structure variants, schedule construction
-models.py           Black and Heston dynamics, QE scheme, ATM matching
+models.py           Black, Heston, Bates, local vol and LSV simulators
+calibrate.py        Heston characteristic function, Lewis integral, fitting
+surface.py          implied-vol surfaces, Dupire local vol, LSV leverage
+greeks.py           delta, gamma, vega, rho, theta under common random numbers
 pricer.py           path generation and the pricing engine
+model_study.py      the five-model comparison and forward-skew study
 market.py           live quotes, realised volatility, offline fallback
 worked_example.py   the frozen snapshot and its funding grid
 charts.py           payoff curve, path fan, distributions, sensitivity
@@ -332,14 +368,16 @@ app.py              Streamlit interface
 
 ## Limitations
 
-- **Heston is parameterised, not calibrated** — no option surface is fitted,
-  so its prices quantify model risk rather than replacing the Black number.
-- **No local-stochastic volatility.** Production autocall books go further
-  again: local vol alone reprices today's smile but misstates forward skew,
-  and stochastic vol alone does not reprice the smile exactly. Heston is the
-  step that makes the question visible, not the end of it.
-- **No jumps** — while tail risk is precisely what the capital barrier is
-  exposed to.
+- **No market surface is fitted.** The calibrator is validated by recovering
+  known parameters from a synthetic surface; pointing it at a live option
+  chain is the obvious next step and is not done here. Every number quoted
+  under a skew is therefore model risk quantified, not a market price.
+- **The LSV leverage is binned, not particle-smoothed**, and fits its surface
+  to 0.5 vol points rather than the 0.1 a production calibration reaches.
+- **No discrete dividends, repo, or borrow**; carry is a single continuous
+  rate.
+- **No dynamic hedging cost** — the Greeks are reported but no replication
+  P&L is simulated against them.
 - **Flat deterministic credit spread**, applied as a uniform continuous bump.
 - No dynamic hedging cost, repo, borrow or market friction.
 - Barriers are tested on observation dates only, as the terms specify. Moves

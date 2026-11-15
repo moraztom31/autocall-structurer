@@ -23,7 +23,7 @@ exactly. Heston is the step that makes the question visible, not the
 end of it.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -73,6 +73,51 @@ class HestonParams:
         return (f"Heston, v0 {np.sqrt(self.v0):.1%} · theta "
                 f"{np.sqrt(self.theta):.1%} · kappa {self.kappa:g} · "
                 f"xi {self.xi:g} · rho {self.rho:+.2f}")
+
+
+@dataclass(frozen=True)
+class BatesParams:
+    """
+    Heston plus lognormal jumps (Bates).
+
+        dS/S = (r - q - lam*k) dt + sqrt(v) dW1 + (J - 1) dN
+        ln J ~ N(mu_j, sigma_j^2),  k = E[J] - 1 = exp(mu_j + sigma_j^2/2) - 1
+
+    The -lam*k term is the compensator: jumps have a non-zero mean
+    effect, and without subtracting it the discounted forward stops
+    being a martingale and every price is biased.
+
+    Why bother on this product. A diffusion reaches the capital barrier
+    by drifting there, which takes time, so short-dated protection looks
+    cheap under Heston alone. Jumps let the index arrive at the barrier
+    at once - which is how barriers are actually breached - and they put
+    a steep skew into short maturities that stochastic volatility cannot
+    produce on its own.
+
+    lam     jump intensity, expected jumps per year
+    mu_j    mean jump size in log terms; negative for equity crash risk
+    sigma_j dispersion of jump sizes
+    """
+
+    v0: float = 0.17**2
+    theta: float = 0.18**2
+    kappa: float = 1.5
+    xi: float = 0.45
+    rho: float = -0.65
+    lam: float = 0.25
+    mu_j: float = -0.12
+    sigma_j: float = 0.15
+
+    label = "Bates"
+
+    @property
+    def compensator(self):
+        """k = E[J] - 1."""
+        return float(np.exp(self.mu_j + 0.5 * self.sigma_j**2) - 1.0)
+
+    def describe(self):
+        return (f"Bates, v0 {np.sqrt(self.v0):.1%} · rho {self.rho:+.2f} · "
+                f"{self.lam:g} jumps/yr of {self.mu_j:+.0%}")
 
 
 def _time_grid(schedule, steps_per_year):
@@ -154,6 +199,12 @@ def simulate_heston(schedule, spot, params, decrement, n_paths, seed=42,
     kappa, theta, xi, rho = (params.kappa, params.theta,
                              params.xi, params.rho)
 
+    jumps = isinstance(params, BatesParams)
+    lam = params.lam if jumps else 0.0
+    mu_j = params.mu_j if jumps else 0.0
+    sigma_j = params.sigma_j if jumps else 0.0
+    jump_drift = lam * params.compensator if jumps else 0.0
+
     rng = np.random.default_rng(seed)
     half = n_paths // 2
     n = 2 * half
@@ -209,8 +260,19 @@ def simulate_heston(schedule, spot, params, decrement, n_paths, seed=42,
         zs_half = rng.standard_normal((half,))
         zs = np.concatenate([zs_half, -zs_half])
 
-        x = (x + (r - decrement) * dt + k0 + k1 * v + k2 * v_next
+        x = (x + (r - decrement - jump_drift) * dt + k0 + k1 * v
+             + k2 * v_next
              + np.sqrt(np.maximum(k3 * v + k4 * v_next, 0.0)) * zs)
+
+        if lam > 0.0:
+            counts = rng.poisson(lam * dt, size=n)
+            hit = counts > 0
+            if hit.any():
+                tot = counts[hit]
+                x[hit] += (mu_j * tot
+                           + sigma_j * np.sqrt(tot)
+                           * rng.standard_normal(hit.sum()))
+
         v = v_next
 
         if k in obs_set:
@@ -219,18 +281,18 @@ def simulate_heston(schedule, spot, params, decrement, n_paths, seed=42,
     return out
 
 
-def simulate(schedule, spot, params, decrement, n_paths, seed=42, **kw):
-    """Dispatch on the parameter type."""
-    if isinstance(params, HestonParams):
-        return simulate_heston(schedule, spot, params, decrement,
-                               n_paths, seed, **kw)
-    return simulate_black(schedule, spot, params, decrement, n_paths, seed)
-
-
 def implied_spot_vol(params):
     """Spot volatility, for labelling and for seeding a Black comparison."""
-    return (float(np.sqrt(params.v0)) if isinstance(params, HestonParams)
-            else float(params.vol))
+    if isinstance(params, (HestonParams, BatesParams)):
+        return float(np.sqrt(params.v0))
+    if isinstance(params, BlackParams):
+        return float(params.vol)
+    # local vol and LSV carry a surface rather than a single number;
+    # their spot volatility is whatever it is at the money, today
+    try:
+        return float(np.atleast_1d(params.vol(0.0, params.ts[0]))[0])
+    except Exception:                                   # noqa: BLE001
+        return float(np.sqrt(params.heston.v0))
 
 
 def atm_implied_vol(schedule, spot, params, decrement, maturity_idx=-1,
@@ -289,7 +351,164 @@ def match_atm_vol(schedule, spot, params, decrement, target_vol,
         scale = (target_vol / got) ** 2
         if abs(scale - 1.0) < 1e-3:
             break
-        p = HestonParams(v0=p.v0 * scale, theta=p.theta * scale,
-                         kappa=p.kappa, xi=p.xi * np.sqrt(scale),
-                         rho=p.rho)
+        p = replace(p, v0=p.v0 * scale, theta=p.theta * scale,
+                    xi=p.xi * float(np.sqrt(scale)))
     return p
+
+
+def _forward_curve(schedule, grid, decrement):
+    """Deterministic forward factor exp(int (r-q)) at each grid time."""
+    rates = _step_rates(schedule, grid)
+    dts = np.diff(grid)
+    return np.concatenate([[0.0],
+                           np.cumsum((rates - decrement) * dts)])
+
+
+def simulate_local_vol(schedule, spot, params, decrement, n_paths,
+                       seed=42, steps_per_year=104):
+    """
+    Dupire local volatility by log-Euler.
+
+    The volatility is read at each step from the local-vol grid at the
+    path's own log-moneyness against the deterministic forward, which is
+    the coordinate the surface was built in. Local vol has no exact
+    scheme, so the step has to be fine enough: the volatility changes
+    with the spot within the step, and a coarse grid systematically
+    understates how fast it moves in the wings.
+    """
+    grid, obs_pos = _time_grid(schedule, steps_per_year)
+    dts = np.diff(grid)
+    rates = _step_rates(schedule, grid)
+    fwd_log = _forward_curve(schedule, grid, decrement)
+
+    rng = np.random.default_rng(seed)
+    half = n_paths // 2
+    n = 2 * half
+
+    x = np.full(n, np.log(spot))
+    out = np.empty((n, len(schedule)))
+    obs_set = {int(p): i for i, p in enumerate(obs_pos)}
+
+    for step, dt in enumerate(dts, start=1):
+        t = grid[step - 1]
+        k = x - (np.log(spot) + fwd_log[step - 1])
+        sig = params.vol(k, t)
+
+        z_half = rng.standard_normal(half)
+        z = np.concatenate([z_half, -z_half])
+
+        x = (x + (rates[step - 1] - decrement - 0.5 * sig**2) * dt
+             + sig * np.sqrt(dt) * z)
+
+        if step in obs_set:
+            out[:, obs_set[step]] = np.exp(x)
+
+    return out
+
+
+def _qe_variance_step(v, dt, kappa, theta, xi, zv, u, psi_c=1.5):
+    """
+    One Andersen QE step of the Heston variance, given the draws.
+
+    Factored out so Heston and LSV step their variance identically -
+    the leverage function changes the spot equation only.
+    """
+    e = np.exp(-kappa * dt)
+    m = theta + (v - theta) * e
+    s2 = (v * xi**2 * e * (1 - e) / kappa
+          + theta * xi**2 * (1 - e)**2 / (2 * kappa))
+    psi = np.where(m > 1e-14, s2 / np.maximum(m**2, 1e-300), np.inf)
+
+    inv_psi = 2.0 / np.maximum(psi, 1e-300)
+    b2 = np.maximum(inv_psi - 1 + np.sqrt(np.maximum(
+        inv_psi * (inv_psi - 1), 0.0)), 0.0)
+    a = m / np.maximum(1 + b2, 1e-300)
+    v_lo = a * (np.sqrt(b2) + zv) ** 2
+
+    p = np.clip((psi - 1) / (psi + 1), 0.0, 1.0 - 1e-12)
+    beta = np.where(m > 1e-14, (1 - p) / np.maximum(m, 1e-300), 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        v_hi = np.where(u <= p, 0.0,
+                        np.log(np.maximum((1 - p) / (1 - u), 1e-300))
+                        / np.maximum(beta, 1e-300))
+
+    return np.maximum(np.where(psi <= psi_c, v_lo, v_hi), 0.0)
+
+
+def simulate_lsv(schedule, spot, params, decrement, n_paths, seed=42,
+                 steps_per_year=104):
+    """
+    Local-stochastic volatility: Heston variance scaled by a calibrated
+    leverage function L(S, t).
+
+        d ln S = (r - q - L^2 v / 2) dt + L sqrt(v) dW1
+
+    The correlated part of the spot increment is substituted out of the
+    variance equation rather than drawn separately:
+
+        sqrt(v) dW2 = [ dv - kappa (theta - v) dt ] / xi
+
+    so the spot step uses the *exact* variance increment the QE scheme
+    just produced. Drawing a correlated normal instead would reintroduce
+    the discretisation error that QE was chosen to avoid, and would
+    understate the skew - which is the entire reason for running this
+    model.
+    """
+    h = params.heston
+    kappa, theta, xi, rho = h.kappa, h.theta, h.xi, h.rho
+
+    grid, obs_pos = _time_grid(schedule, steps_per_year)
+    dts = np.diff(grid)
+    rates = _step_rates(schedule, grid)
+    fwd_log = _forward_curve(schedule, grid, decrement)
+
+    rng = np.random.default_rng(seed)
+    half = n_paths // 2
+    n = 2 * half
+
+    v = np.full(n, h.v0)
+    x = np.full(n, np.log(spot))
+    out = np.empty((n, len(schedule)))
+    obs_set = {int(p): i for i, p in enumerate(obs_pos)}
+
+    for step, dt in enumerate(dts, start=1):
+        t = grid[step - 1]
+
+        zv = np.concatenate([(zh := rng.standard_normal(half)), -zh])
+        u = np.concatenate([(uh := rng.random(half)), 1.0 - uh])
+        v_next = _qe_variance_step(v, dt, kappa, theta, xi, zv, u)
+
+        k = x - (np.log(spot) + fwd_log[step - 1])
+        lev = params.value(k, t)
+
+        v_bar = 0.5 * (v + v_next)
+        zi = np.concatenate([(zh2 := rng.standard_normal(half)), -zh2])
+
+        x = (x + (rates[step - 1] - decrement) * dt
+             - 0.5 * lev**2 * v_bar * dt
+             + lev * rho / xi * ((v_next - v) - kappa * (theta - v_bar) * dt)
+             + lev * np.sqrt(1 - rho**2)
+             * np.sqrt(np.maximum(v_bar * dt, 0.0)) * zi)
+
+        v = v_next
+        if step in obs_set:
+            out[:, obs_set[step]] = np.exp(x)
+
+    return out
+
+
+def simulate(schedule, spot, params, decrement, n_paths, seed=42, **kw):
+    """Dispatch on the parameter type."""
+    name = type(params).__name__
+    if name == "LocalVolParams":
+        return simulate_local_vol(schedule, spot, params, decrement,
+                                  n_paths, seed, **kw)
+    if name == "LSVParams":
+        return simulate_lsv(schedule, spot, params, decrement,
+                            n_paths, seed, **kw)
+    if isinstance(params, (HestonParams, BatesParams)):
+        return simulate_heston(schedule, spot, params, decrement,
+                               n_paths, seed, **kw)
+    return simulate_black(schedule, spot, params, decrement, n_paths, seed)
+
+

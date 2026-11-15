@@ -18,7 +18,9 @@ import charts
 import worked_example as wx
 from deal import ATHENA, NOMINAL, PHOENIX, Deal, build_schedule
 from market import DEFAULT_RATE, DEFAULT_VOL, INDICES, fetch_quote
-from models import BlackParams, HestonParams, match_atm_vol
+from models import (BatesParams, BlackParams, HestonParams,
+                    match_atm_vol)
+from surface import VolSurface, LocalVolParams, calibrate_lsv
 from pricer import payoff_at_maturity, price, simulate_paths
 
 st.set_page_config(page_title="Autocallable Structurer",
@@ -89,6 +91,30 @@ st.markdown("""
 @st.cache_data(show_spinner=False, ttl=900)
 def cached_quote(ticker):
     return fetch_quote(ticker)
+
+
+@st.cache_data(show_spinner=False)
+def surface_models(_schedule, spot, decrement, target_vol, theta_v,
+                   kappa, xi, rho):
+    """
+    Local vol and LSV built from one surface, cached together.
+
+    Both are expensive — the surface needs a grid of inversions and the
+    LSV leverage has to be bootstrapped forward — and they always travel
+    together, so they are built and cached in one call.
+    """
+    base = calibrated_heston(_schedule, spot, decrement, target_vol,
+                             theta_v, kappa, xi, rho)
+    ts = VolSurface.dense_maturities(_schedule.times[-1])
+    dfs = [float(np.interp(t, np.concatenate([[0.0], _schedule.times]),
+                           np.concatenate([[1.0], _schedule.df_ois])))
+           for t in ts]
+    fwds = [spot / d * np.exp(-decrement * t) for d, t in zip(dfs, ts)]
+    surf = VolSurface.from_params(base, fwds, dfs, ts)
+    local = LocalVolParams(surf, decrement)
+    lsv = calibrate_lsv(_schedule, spot, base, local, decrement,
+                        n_paths=60_000)
+    return base, surf, local, lsv
 
 
 @st.cache_data(show_spinner=False)
@@ -252,12 +278,23 @@ with st.sidebar:
                                    value=1, format_func=FREQ.get)
 
     st.markdown("### Volatility model")
-    model_name = st.radio(
-        "Model", ["Black, flat", "Heston"], horizontal=True,
+    model_name = st.selectbox(
+        "Model", ["Black, flat", "Heston", "Bates", "Local vol", "LSV"],
         label_visibility="collapsed",
-        captions=["One sigma, no skew", "Stochastic vol, with skew"])
+        help="Black has no skew. Heston adds stochastic volatility, "
+             "Bates adds jumps on top. Local vol and LSV are built from "
+             "a surface and reprice it exactly.")
+    st.caption({
+        "Black, flat": "One sigma for every strike — no skew at all.",
+        "Heston": "Stochastic volatility: skew from spot/vol correlation.",
+        "Bates": "Heston plus jumps — steepens the short-dated skew.",
+        "Local vol": "Dupire, from the surface. Reprices every vanilla, "
+                     "then flattens the forward skew.",
+        "LSV": "Leverage times stochastic variance. Reprices the "
+               "surface and keeps the forward skew.",
+    }[model_name])
 
-    if model_name == "Heston":
+    if model_name in ("Heston", "Bates", "Local vol", "LSV"):
         st.caption("Parameterised, not calibrated — there is no option "
                    "surface here to fit, and a decrement index has "
                    "almost no listed options to fit to.")
@@ -277,6 +314,15 @@ with st.sidebar:
             help="Scales v0 and theta so both models carry the same "
                  "at-the-money volatility. Without it, the gap between "
                  "them mixes the level of vol with the skew.")
+        if model_name == "Bates":
+            h_lam = st.slider("Jump intensity per year", 0.0, 2.0, 0.25,
+                              0.05, format="%.2f")
+            h_muj = st.slider("Mean jump size", -0.40, 0.10, -0.12, 0.01,
+                              format="%.2f")
+        if model_name in ("Local vol", "LSV"):
+            st.caption("Built from the surface these parameters imply. "
+                       "The LSV leverage takes a few seconds to "
+                       "bootstrap the first time.")
 
     st.markdown("### Structure")
     style_label = st.radio(
@@ -338,20 +384,34 @@ schedule = (wx.schedule_for(deal) if mode == "Worked example"
             else build_schedule(deal, flat_rate))
 
 black = BlackParams(vol)
-if model_name == "Heston":
-    if match_atm:
-        model = calibrated_heston(schedule, spot, decrement, vol,
-                                  h_theta, h_kappa, h_xi, h_rho)
-    else:
-        model = HestonParams(v0=vol**2, theta=h_theta**2, kappa=h_kappa,
-                             xi=h_xi, rho=h_rho)
-else:
+sim_kw = {}
+if model_name == "Black, flat":
     model = black
+elif model_name == "Heston":
+    model = (calibrated_heston(schedule, spot, decrement, vol, h_theta,
+                               h_kappa, h_xi, h_rho) if match_atm
+             else HestonParams(v0=vol**2, theta=h_theta**2,
+                               kappa=h_kappa, xi=h_xi, rho=h_rho))
+elif model_name == "Bates":
+    h = (calibrated_heston(schedule, spot, decrement, vol, h_theta,
+                           h_kappa, h_xi, h_rho) if match_atm
+         else HestonParams(v0=vol**2, theta=h_theta**2, kappa=h_kappa,
+                           xi=h_xi, rho=h_rho))
+    model = BatesParams(v0=h.v0 * 0.8, theta=h.theta * 0.8,
+                        kappa=h.kappa, xi=h.xi * 0.8, rho=h.rho,
+                        lam=h_lam, mu_j=h_muj)
+else:
+    with st.spinner("Building the surface…"):
+        _, _surf, _local, _lsv = surface_models(
+            schedule, spot, decrement, vol, h_theta, h_kappa, h_xi, h_rho)
+    model = _local if model_name == "Local vol" else _lsv
+    sim_kw = dict(steps_per_year=104)
 
 # =====================================================================
 # Price
 # =====================================================================
-paths = simulate_paths(schedule, spot, model, decrement, n_paths)
+paths = simulate_paths(schedule, spot, model, decrement, n_paths,
+                       **sim_kw)
 res = price(schedule, spot, model, decrement, spread, deal,
             n_paths=n_paths, paths=paths)
 
@@ -594,6 +654,13 @@ with t_vol:
     grid = np.round(np.arange(max(0.06, vol - 0.03), vol + 0.0301, step), 4)
     sweep_paths = n_paths if model_name == "Black, flat" else min(n_paths,
                                                                  20_000)
+
+    if model_name in ("Local vol", "LSV"):
+        st.info("The volatility ladder is not run for surface-built "
+                "models: shifting their level means rebuilding the "
+                "surface and recalibrating, which is not a one-slider "
+                "operation. The Model risk tab compares them instead.")
+        st.stop()
 
     def shifted(v):
         """Same model, moved to a new volatility level."""
