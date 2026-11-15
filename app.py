@@ -23,55 +23,87 @@ from pricer import payoff_at_maturity, price, simulate_paths
 st.set_page_config(page_title="Autocallable Structurer",
                    page_icon="◫", layout="wide")
 
-st.markdown("""
+def active_theme():
+    """
+    Whichever theme the visitor is actually seeing.
+
+    config.toml sets dark as the default, but the app menu lets anyone
+    switch, so the charts and the CSS below read the live value rather
+    than assuming it. Older Streamlit builds expose nothing here, in
+    which case we fall back to the configured default.
+    """
+    try:
+        return st.context.theme.type or "dark"
+    except Exception:                                   # noqa: BLE001
+        return "dark"
+
+
+THEME = active_theme()
+charts.set_theme(THEME)
+
+if THEME == "dark":
+    C = {"ink": "#E4E8ED", "muted": "#9BA1AA", "faint": "#7D838C",
+         "line": "#2A2D33", "panel": "#15171B", "card": "#15171B",
+         "good_bd": "#2E4A72", "good_bg": "#131B27", "good_tx": "#7FB0F0",
+         "bad_bd": "#6B3A2B", "bad_bg": "#1E1512", "bad_tx": "#E89272",
+         "tag_bg": "#17202D", "tag_tx": "#8FB6EC", "tag_bd": "#28374B"}
+else:
+    C = {"ink": "#1F2328", "muted": "#5A6069", "faint": "#7A8089",
+         "line": "#E3E6EA", "panel": "#FCFCFB", "card": "#FFFFFF",
+         "good_bd": "#BBD3F5", "good_bg": "#F6F9FE", "good_tx": "#1A4FA8",
+         "bad_bd": "#F0C9BE", "bad_bg": "#FDF7F5", "bad_tx": "#A33D27",
+         "tag_bg": "#EEF2F9", "tag_tx": "#2E4568", "tag_bd": "#DCE4F0"}
+
+st.markdown(f"""
 <style>
-  .block-container {padding-top: 2rem; padding-bottom: 3rem;
-                    max-width: 1280px;}
-  h1 {font-weight: 640; letter-spacing: -.02em; font-size: 2.1rem;
-      margin-bottom: .15rem;}
-  h2 {font-weight: 600; letter-spacing: -.01em; font-size: 1.3rem;
-      margin-top: .4rem;}
-  h3 {font-weight: 600; font-size: 1.05rem;}
+  .block-container {{padding-top: 2rem; padding-bottom: 3rem;
+                    max-width: 1280px;}}
+  h1 {{font-weight: 640; letter-spacing: -.02em; font-size: 2.1rem;
+      margin-bottom: .15rem;}}
+  h2 {{font-weight: 600; letter-spacing: -.01em; font-size: 1.3rem;
+      margin-top: .4rem;}}
+  h3 {{font-weight: 600; font-size: 1.05rem;}}
 
-  .lead {color: #5A6069; font-size: .95rem; line-height: 1.6;
-         max-width: 68ch; margin-bottom: .2rem;}
-  .note {color: #6B7079; font-size: .83rem; line-height: 1.55;
-         max-width: 72ch;}
+  .lead {{color: {C["muted"]}; font-size: .95rem; line-height: 1.6;
+         max-width: 68ch; margin-bottom: .2rem;}}
+  .note {{color: {C["faint"]}; font-size: .83rem; line-height: 1.55;
+         max-width: 72ch;}}
 
-  .tagrow {margin: .35rem 0 1.1rem 0;}
-  .tag {display: inline-block; padding: .17rem .6rem; margin-right: .4rem;
+  .tagrow {{margin: .35rem 0 1.1rem 0;}}
+  .tag {{display: inline-block; padding: .17rem .6rem; margin-right: .4rem;
         margin-bottom: .3rem; border-radius: 999px; font-size: .74rem;
-        letter-spacing: .015em; background: #EEF2F9; color: #2E4568;
-        border: 1px solid #DCE4F0;}
+        letter-spacing: .015em; background: {C["tag_bg"]};
+        color: {C["tag_tx"]}; border: 1px solid {C["tag_bd"]};}}
 
-  .cards {display: flex; gap: .7rem; margin: .5rem 0 1rem 0;
-          flex-wrap: wrap;}
-  .card {flex: 1 1 0; min-width: 172px; padding: .85rem 1rem;
-         border: 1px solid #E3E6EA; border-radius: 10px;
-         background: #FFFFFF;}
-  .card .k {font-size: .73rem; text-transform: uppercase;
-            letter-spacing: .055em; color: #7A8089; margin-bottom: .3rem;}
-  .card .v {font-size: 1.62rem; font-weight: 600; letter-spacing: -.02em;
-            color: #1F2328; line-height: 1.12;}
-  .card .s {font-size: .78rem; color: #7A8089; margin-top: .2rem;}
-  .card.good {border-color: #BBD3F5; background: #F6F9FE;}
-  .card.bad  {border-color: #F0C9BE; background: #FDF7F5;}
-  .card.good .v {color: #1A4FA8;}
-  .card.bad  .v {color: #A33D27;}
+  .cards {{display: flex; gap: .7rem; margin: .5rem 0 1rem 0;
+          flex-wrap: wrap;}}
+  .card {{flex: 1 1 0; min-width: 172px; padding: .85rem 1rem;
+         border: 1px solid {C["line"]}; border-radius: 10px;
+         background: {C["card"]};}}
+  .card .k {{font-size: .73rem; text-transform: uppercase;
+            letter-spacing: .055em; color: {C["faint"]};
+            margin-bottom: .3rem;}}
+  .card .v {{font-size: 1.62rem; font-weight: 600; letter-spacing: -.02em;
+            color: {C["ink"]}; line-height: 1.12;}}
+  .card .s {{font-size: .78rem; color: {C["faint"]}; margin-top: .2rem;}}
+  .card.good {{border-color: {C["good_bd"]}; background: {C["good_bg"]};}}
+  .card.bad  {{border-color: {C["bad_bd"]};  background: {C["bad_bg"]};}}
+  .card.good .v {{color: {C["good_tx"]};}}
+  .card.bad  .v {{color: {C["bad_tx"]};}}
 
-  .ts {border: 1px solid #E3E6EA; border-radius: 10px; padding: .2rem 1rem;
-       background: #FCFCFB;}
-  .ts table {width: 100%; border-collapse: collapse; font-size: .86rem;}
-  .ts td {padding: .42rem 0; border-bottom: 1px solid #EDEFF2;
-          color: #3C4149;}
-  .ts td:first-child {color: #7A8089; width: 52%;}
-  .ts tr:last-child td {border-bottom: none;}
+  .ts {{border: 1px solid {C["line"]}; border-radius: 10px;
+       padding: .2rem 1rem; background: {C["panel"]};}}
+  .ts table {{width: 100%; border-collapse: collapse; font-size: .86rem;}}
+  .ts td {{padding: .42rem 0; border-bottom: 1px solid {C["line"]};
+          color: {C["ink"]};}}
+  .ts td:first-child {{color: {C["faint"]}; width: 52%;}}
+  .ts tr:last-child td {{border-bottom: none;}}
 
-  section[data-testid="stSidebar"] {border-right: 1px solid #E8EAED;}
-  section[data-testid="stSidebar"] h3 {font-size: .78rem;
-      text-transform: uppercase; letter-spacing: .07em; color: #7A8089;
-      margin-top: 1.1rem; margin-bottom: .1rem;}
-  hr {margin: .9rem 0;}
+  section[data-testid="stSidebar"] {{border-right: 1px solid {C["line"]};}}
+  section[data-testid="stSidebar"] h3 {{font-size: .78rem;
+      text-transform: uppercase; letter-spacing: .07em;
+      color: {C["faint"]}; margin-top: 1.1rem; margin-bottom: .1rem;}}
+  hr {{margin: .9rem 0;}}
 </style>
 """, unsafe_allow_html=True)
 
