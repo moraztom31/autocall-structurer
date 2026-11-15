@@ -1,189 +1,244 @@
 # Phoenix Autocallable — Monte Carlo Pricer
 
-Pricer Monte Carlo pour une note **Phoenix autocallable** adossée à un indice
-actions **decrement**, avec interface Streamlit.
+Monte Carlo pricer for **Phoenix autocallable notes**, with a Streamlit
+interface. It computes fair value, derives the issuer's **gross structuring
+margin**, and measures how that margin responds to volatility and to each
+product lever.
 
-Le pricer calcule la *fair value* de la note, en déduit la **marge brute de
-structuration** de l'émetteur, et mesure la sensibilité de cette marge à la
-volatilité et aux paramètres du produit.
+Two modes:
+
+| Mode | What it does |
+|---|---|
+| **Worked example** | One deal on a frozen market snapshot, reproducible to the cent |
+| **Note builder** | Pick an index, set the terms, price any Phoenix |
 
 ---
 
-## Le produit
+## The product
 
-Une note Phoenix verse un coupon conditionnel et peut être remboursée par
-anticipation. Trois mécanismes, testés à des dates d'observation fixées :
+A Phoenix pays a conditional coupon and can redeem early. Three tests, each
+on the index level relative to where it started:
 
-| Mécanisme | Fréquence | Condition | Conséquence |
+| Test | Frequency | Condition | Outcome |
 |---|---|---|---|
-| Coupon conditionnel | trimestrielle | indice ≥ 60 % du niveau initial | coupon de 1,50 % du nominal |
-| Autocall | annuelle | indice ≥ 100 % du niveau initial | remboursement au pair, la note s'éteint |
-| Barrière capitale | à l'échéance | indice ≥ 60 % du niveau initial | remboursement au pair, sinon `nominal × S_T / S₀` |
+| Coupon | quarterly | index ≥ 60 % of initial | pay the coupon, otherwise nothing |
+| Autocall | annually | index ≥ 100 % of initial | redeem at par, the note ends |
+| Capital | final valuation only | index ≥ 60 % of initial | redeem at par, otherwise `par × index / initial` |
 
-Les coupons sont **sans mémoire** : un coupon manqué n'est pas rattrapé.
+Coupons carry **no memory**: a missed coupon is not recovered later.
 
-Un **Phoenix** sépare la barrière de coupon (60 %) et la barrière d'autocall
-(100 %). Dans un **Athena**, les deux coïncident et les coupons sont accumulés
-puis payés au rappel.
+A **Phoenix** keeps the coupon and autocall barriers apart, which is what lets
+it keep paying in a market that has fallen but not collapsed. An **Athena**
+aligns them and accrues coupons to the call date instead.
 
-### L'indice decrement
+The capital barrier is a cliff, not a slope. One tick above it the holder is
+repaid in full; one tick below, redemption drops to 60 % of nominal and falls
+from there with the index.
 
-Le sous-jacent retire une performance fixe de **5 % par an** en continu. Ce
-mécanisme remplace l'incertitude sur les dividendes futurs par une déduction
-connue d'avance, ce qui permet à l'émetteur de couvrir la note sans porter de
-risque de dividende.
+### Decrement indices
 
-Conséquence sur le pricing : sous la mesure risque-neutre,
+A decrement index deducts a fixed performance — here 5 % a year — by
+construction. The mechanism replaces an uncertain future dividend stream with
+a known deduction, which lets the issuer hedge without carrying dividend risk.
+
+Under the risk-neutral measure:
 
 ```
-dS = (r − q)·S·dt + σ·S·dW     avec q = 5 %
+dS = (r − q)·S·dt + σ·S·dW     with q = the decrement
 ```
 
-Avec `r ≈ 3 %` et `q = 5 %`, le **drift est négatif**. L'indice dérive vers le
-bas, ce qui réduit la probabilité d'autocall et abaisse la fair value.
-Omettre `q` surévalue nettement la note. Le decrement remplace le dividende,
-il ne s'y ajoute pas.
+With `r ≈ 3 %` and `q = 5 %` the **drift is negative**. The underlying equities
+must outpace the deduction before the index goes anywhere, which makes the
+autocall materially harder to reach than the headline terms suggest. Omitting
+`q` overstates fair value. The decrement replaces the dividend yield rather
+than adding to it.
 
 ---
 
-## Méthode
+## Method
 
-Simulation exacte du GBM entre dates d'observation :
+The GBM is simulated exactly in log space, so there is no discretisation error
+from the time step:
 
 ```
 S(t+Δt) = S(t) · exp[ (f − q − σ²/2)·Δt + σ·√Δt·Z ]
 ```
 
-où `f` est le forward OIS implicite dans la table de facteurs d'actualisation.
+`f` is the forward rate implied by the discount curve over each step.
 
-- 50 000 chemins, **variables antithétiques** pour réduire la variance
-- Détection de l'autocall à la **première** date franchie, extinction de tous
-  les flux ultérieurs
-- Actualisation des flux de la note au taux OIS **majoré d'un spread de
-  crédit** : `DF_note(T) = DF_OIS(T) · e^(−sT)`
+- 50 000 paths by default, **antithetic sampling** to halve the standard error
+- Autocall detected at the **first** date breached, with every later cash flow
+  switched off
+- Note cash flows discounted at the risk-free rate plus an issuer credit
+  spread: `DF_note(T) = DF_rf(T) · e^(−sT)`
 
-Le spread ne s'applique qu'aux flux de la note. La couverture se finance à OIS,
-donc le drift de l'indice reste piloté par les forwards OIS.
+The spread applies to the note's own flows only. The hedge is funded at the
+risk-free rate, so the index drift is unaffected.
 
-### Choix du spread de crédit
+### Choosing the credit spread
 
-Le spread est lu dans une grille de trésorerie indexée sur la durée de vie
-attendue de la note (+10 bp à 1 an, +30 bp à 5 ans). Un spread plus large
-abaisse la fair value et flatte donc la marge affichée — le choix doit être
-justifié économiquement.
+The spread comes from a funding grid indexed on the note's expected life
+(+10 bp at one year, +30 bp at five). A wider spread lowers fair value and
+flatters the margin, so the choice needs to stand on its own.
 
-Le pricer mesure la **durée de vie attendue simulée** (moyenne des dates de
-sortie), ce qui permet de choisir la ligne de la grille sur la base du modèle
-plutôt qu'à l'estime.
+The pricer measures the **simulated expected life** — the mean exit date
+across paths — which lets the grid line be read off the model rather than
+picked by eye.
 
 ---
 
-## Résultats sur le jeu de paramètres d'exemple
+## Worked example
 
-Termes : coupon 6 % p.a. · barrière 60 % · autocall 100 % · émission 100 % ·
-vol 17 % · plancher de marge 1,50 %.
+Terms: 6 % p.a. · 60 % coupon barrier · autocall at 100 % · issued at 100 % ·
+17 % implied volatility · 1.50 % margin floor · 5 % decrement index.
 
-Durée de vie simulée de **2,94 ans**, qui désigne la ligne 3Y de la grille
-(+20 bp).
+Simulated expected life of **2.94 years**, which selects the 3Y grid line at
++20 bp.
 
-| Durée retenue | Spread | Fair value | Marge brute |
+| Expected life | Spread | Fair value | Gross margin |
 |---|---|---|---|
-| 1Y | +10 bp | 993,50 € | 0,65 % |
-| 2Y | +15 bp | 992,23 € | 0,78 % |
-| **3Y** | **+20 bp** | **990,97 €** | **0,90 %** |
-| 5Y | +30 bp | 988,44 € | 1,16 % |
+| 1Y | +10 bp | 993.50 | 0.65 % |
+| 2Y | +15 bp | 992.23 | 0.78 % |
+| **3Y** | **+20 bp** | **990.97** | **0.90 %** |
+| 5Y | +30 bp | 988.44 | 1.16 % |
 
-**Aucun choix de spread n'atteint le plancher de 1,50 %.** Les termes proposés
-sont inéconomiques pour l'émetteur.
+**No grid line clears the 1.50 % floor.** The proposed terms are uneconomic
+for the issuer — and the honest spread choice is not the flattering one.
 
-### Ce que vit le client
+### What the holder experiences
 
 | | |
 |---|---|
-| Probabilité de rappel anticipé | 60,3 % |
-| Probabilité de perte en capital | 15,0 % |
-| Coupons encaissés en moyenne | 10,2 sur 20 |
+| Probability of early redemption | 60.3 % |
+| Probability of capital loss | 15.0 % |
+| Coupons paid on average | 10.2 of 20 |
 
-L'écart entre le coupon affiché (6 % p.a.) et l'espérance réelle vient de
-l'autocall : la note est souvent rappelée avant d'avoir payé la moitié de ses
-coupons.
+The gap between the 6 % headline and what is actually collected is the
+autocall: the note is usually redeemed before half its coupons have been paid,
+and it redeems in exactly the markets where staying invested would have been
+pleasant.
 
-### Risque de repricing en volatilité
+Most of the fair value — around 85 % — is the repayment of capital rather than
+the income, which is the reverse of how these notes are usually discussed.
 
-| Volatilité | Fair value | Marge | Écart |
+### Volatility repricing risk
+
+| Implied vol | Fair value | Gross margin | vs base |
 |---|---|---|---|
-| 16 % | 1 000,82 € | −0,08 % | −98 bp |
-| 17 % | 990,97 € | 0,90 % | — |
-| 18 % | 981,05 € | 1,89 % | +99 bp |
+| 16 % | 1 000.82 | −0.08 % | −98 bp |
+| 17 % | 990.97 | 0.90 % | — |
+| 18 % | 981.05 | 1.89 % | +99 bp |
 
-La marge bouge d'environ **1 point pour 1 point de volatilité**, soit davantage
-que le plancher lui-même. Si la volatilité se reprice entre la date de
-référence et l'émission, l'économie du deal change entièrement. C'est un
-argument de calendrier d'exécution — pas une invitation à retenir l'hypothèse
-de volatilité qui arrange.
+The margin moves roughly **one point of nominal per point of volatility** —
+more than the floor itself, and enough to turn the trade loss-making at 16 %.
+The economics rest on an assumption that moves daily. That is an argument
+about execution timing, not a reason to adopt whichever volatility clears the
+floor.
 
-### Leviers de révision
+### Revision levers
 
-Chaque ligne donne la valeur du levier qui ramène la marge exactement à 1,50 %,
-les autres paramètres restant inchangés.
+Each line is the value that brings the margin back to the floor, everything
+else unchanged.
 
-| Levier | Point mort | Effet sur le client |
+| Lever | Breakeven | Cost |
 |---|---|---|
-| Coupon | 6,00 % → **5,75 %** p.a. | le plus visible commercialement |
-| Barrière coupon | 60 % → **63,6 %** | coupons plus difficiles, 9,9 payés contre 10,2 |
-| Barrière capitale | 60 % → **62,1 %** | protection dégradée, perte en capital à 19 % |
+| Coupon | 6.00 % → **5.75 %** p.a. | the most visible term to an adviser |
+| Coupon barrier | 60 % → **63.6 %** | 9.9 coupons paid instead of 10.2 |
+| Capital barrier | 60 % → **62.1 %** | loss probability rises to 16.8 % |
 
-Abaisser la barrière coupon ou la barrière capitale rend le produit **plus
-généreux**, donc plus coûteux à fabriquer : ces leviers dégradent la marge. Pour
-l'améliorer il faut les **relever**.
+Lowering the coupon or capital barrier makes the note **more** generous and
+therefore more expensive to manufacture: those moves cost margin. Raising them
+is what recovers it.
 
 ---
 
-## Utilisation
+## Note builder
+
+Pick an index, set the terms, price it. Spot and price history are pulled
+live; everything else is yours to set — maturity, coupon frequency, barriers,
+autocall schedule, issue price, credit spread, and a synthetic decrement.
+
+### On volatility
+
+The builder offers an **implied volatility field** and a **realised-volatility
+proxy**, and labels which one is in use. That distinction is not cosmetic.
+
+Implied volatility is not available from free data sources, and it is the
+input that matters most: a one-point error moves the margin by about a point
+of nominal. Realised volatility is backward-looking, carries no volatility
+risk premium, and typically sits below implied on equity indices — so pricing
+on it flatters the margin. It is a reasonable starting point and a poor
+substitute.
+
+Decrement indices are not quoted on free sources either. The builder applies a
+**synthetic decrement** to a standard index instead, which also makes the
+effect easy to see by varying it.
+
+Live quotes are delayed and best-effort. If the provider cannot be reached the
+app falls back to manual entry rather than failing.
+
+---
+
+## Running it
 
 ```bash
 pip install -r requirements.txt
 
-python main.py            # tableau de résultats complet
-streamlit run app.py      # interface interactive
+python main.py          # full analysis of the worked example
+streamlit run app.py    # interactive interface
 ```
 
-En tant que bibliothèque :
+As a library:
 
 ```python
 from pricer import price
+import worked_example as wx
 
-res = price(expected_life=3)
+res = price(wx.SCHEDULE, wx.SPOT, wx.VOL, wx.DECREMENT,
+            wx.CREDIT_GRID[3], wx.DEAL)
 print(res.fair_value, res.margin_pct, res.expected_life)
-
-# tester un levier
-revised = price(expected_life=3, coupon_rate=0.014375)
 ```
 
-### Structure
+Any structure, through the schedule builder:
+
+```python
+from deal import Deal, build_schedule
+from pricer import price
+
+deal = Deal(maturity_years=3, coupons_per_year=2, coupon_rate_pa=0.08,
+            coupon_barrier=0.70, autocall_barrier=0.95)
+schedule = build_schedule(deal, flat_rate=0.03)
+res = price(schedule, spot=5000, vol=0.20, decrement=0.0,
+            credit_spread=0.002, deal=deal)
+```
+
+### Files
 
 ```
-market_data.py   paramètres, calendrier d'observation, courbe, grille de crédit
-pricer.py        génération des chemins et moteur de pricing
-main.py          analyse complète en ligne de commande
-app.py           interface Streamlit
+deal.py             deal terms, observation schedule construction
+pricer.py           path generation and the pricing engine
+market.py           live quotes, realised volatility, offline fallback
+worked_example.py   the frozen snapshot and its funding grid
+charts.py           payoff curve, path fan, distributions, sensitivity
+main.py             command-line analysis
+app.py              Streamlit interface
 ```
 
 ---
 
-## Limites
+## Limitations
 
-- Volatilité **Black plate** : pas de surface, donc le skew n'est pas capturé.
-  Un produit à barrière est sensible au skew — la fair value serait différente
-  avec une volatilité locale ou stochastique.
-- Modèle **log-normal** : pas de sauts, alors que le risque de queue est
-  précisément ce qui détermine la barrière capitale.
-- Spread de crédit **plat et déterministe**, appliqué comme une majoration
-  continue uniforme.
-- Pas de coût de couverture dynamique, de repo, ni de frottements de marché.
+- **Flat Black volatility, no skew.** Barrier products are sensitive to skew;
+  a local or stochastic volatility model would give a different number.
+- **Lognormal, no jumps** — while tail risk is precisely what the capital
+  barrier is exposed to.
+- **Flat deterministic credit spread**, applied as a uniform continuous bump.
+- No dynamic hedging cost, repo, borrow or market friction.
+- Barriers are tested on observation dates only, as the terms specify. Moves
+  between dates are not observed, which is a feature of the product rather
+  than a modelling shortcut.
 
-Les paramètres fournis sont un jeu d'exemple cohérent destiné à la
-démonstration, pas une cotation de marché.
+Figures are indicative and not a quotation.
 
 ## Licence
 

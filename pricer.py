@@ -1,161 +1,179 @@
 """
-Monte Carlo pour le Healthcare Phoenix Autocallable.
+Monte Carlo engine for Phoenix autocallable notes.
 
-Logique, par chemin simule :
-  1. generer le niveau de l'indice a chaque date d'observation (GBM, q = 5 %)
-  2. parcourir les dates dans l'ordre :
-       - coupon si S >= barriere coupon
-       - si date d'autocall et S >= barriere autocall : remboursement, STOP
-  3. si jamais rappele : barriere finale sur le capital
-  4. actualiser chaque flux avec DF_note et sommer
+Per simulated path:
+  1. draw the index level at every observation date (GBM, decrement q)
+  2. walk the dates in order:
+       - pay a coupon where the index is at or above the coupon barrier
+       - on an autocall date at or above the autocall barrier: redeem, stop
+  3. if never called, apply the capital barrier at final valuation
+  4. discount every cash flow with the note's own discount factors
 
-La fair value est la moyenne de ces valeurs actualisees.
+Fair value is the mean of the discounted path values. The gross
+structuring margin is the issue price less that fair value.
 """
 
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from market_data import (
-    AUTOCALL_BARRIER,
-    CAPITAL_BARRIER,
-    COUPON_BARRIER,
-    COUPON_RATE,
-    CREDIT_GRID,
-    DECREMENT,
-    IS_AUTOCALL,
-    ISSUE_PRICE,
-    MARGIN_FLOOR,
-    N_OBS,
-    NOMINAL,
-    S0,
-    TIMES,
-    VOL_BASE,
-    df_note,
-    forward_rates,
-)
+from deal import NOMINAL, Deal
 
 
 @dataclass
-class PricingResult:
-    """Sortie d'un pricing : valeur, marge, et diagnostics."""
+class Result:
+    """Pricing output plus the diagnostics the interface charts."""
 
-    fair_value: float            # EUR par note
-    margin_pct: float            # marge brute en % du nominal
+    fair_value: float            # currency per note
+    margin_pct: float            # gross structuring margin, % of nominal
     passes_floor: bool
-    expected_life: float         # duree de vie moyenne, en annees
-    prob_autocall: float         # proba de rappel avant maturite
-    prob_capital_loss: float     # proba de finir sous la barriere capitale
-    avg_coupons_paid: float      # nombre moyen de coupons encaisses
-    pv_coupons: float            # part de la FV venant des coupons
-    pv_redemption: float         # part de la FV venant du remboursement
+    margin_gap_bp: float         # distance to the floor, basis points
+
+    expected_life: float         # mean time to exit, years
+    prob_autocall: float
+    prob_capital_loss: float
+    avg_coupons_paid: float
+    pv_coupons: float
+    pv_redemption: float
+
+    # per-path arrays, kept for the distribution charts
+    exit_times: np.ndarray = field(repr=False, default=None)
+    total_payout: np.ndarray = field(repr=False, default=None)
+    final_level_pct: np.ndarray = field(repr=False, default=None)
+
     inputs: dict = field(default_factory=dict)
 
 
-def simulate_paths(n_paths, vol, seed=42):
+def simulate_paths(schedule, spot, vol, decrement, n_paths=50_000, seed=42):
     """
-    Genere les niveaux de l'indice aux N_OBS dates d'observation.
+    Index levels at every observation date under the risk-neutral measure.
 
-    Schema exact du GBM entre deux dates (pas de discretisation d'Euler,
-    le GBM se simule exactement) :
+    The GBM is simulated exactly in log space, so there is no
+    discretisation error from the time step:
 
         S(t+dt) = S(t) * exp[ (f - q - vol^2/2)*dt + vol*sqrt(dt)*Z ]
 
-    ou f est le forward OIS sur la periode et q le decrement de 5 %.
+    f is the forward rate over the step and q the index decrement. On a
+    decrement index q is a published deduction rather than a dividend
+    yield, and it is already reflected in the quoted level - so it is
+    modelled here and no separate dividend is subtracted.
 
-    Retourne un tableau (n_paths, N_OBS).
+    Antithetic sampling: each draw Z is paired with -Z, which halves the
+    standard error of the mean at no extra cost.
+
+    Returns an array of shape (n_paths, len(schedule)).
     """
-    fwd, dt = forward_rates()
+    fwd, dt = schedule.forward_rates()
 
     rng = np.random.default_rng(seed)
-    # Variables antithetiques : pour chaque tirage Z on simule aussi -Z.
-    # Cela reduit la variance sans cout supplementaire.
     half = n_paths // 2
-    z_half = rng.standard_normal((half, N_OBS))
+    z_half = rng.standard_normal((half, len(schedule)))
     z = np.concatenate([z_half, -z_half], axis=0)
 
-    drift = (fwd - DECREMENT - 0.5 * vol**2) * dt
+    drift = (fwd - decrement - 0.5 * vol**2) * dt
     diffusion = vol * np.sqrt(dt)
 
-    log_increments = drift + diffusion * z
-    log_path = np.cumsum(log_increments, axis=1)
-
-    return S0 * np.exp(log_path)
+    return spot * np.exp(np.cumsum(drift + diffusion * z, axis=1))
 
 
-def price(n_paths=50_000, vol=VOL_BASE, expected_life=5,
-          coupon_rate=COUPON_RATE, coupon_barrier=COUPON_BARRIER,
-          autocall_barrier=AUTOCALL_BARRIER, capital_barrier=CAPITAL_BARRIER,
-          issue_price=ISSUE_PRICE, seed=42):
+def price(schedule, spot, vol, decrement, credit_spread,
+          deal=None, n_paths=50_000, seed=42, paths=None):
     """
-    Price le Phoenix et renvoie fair value + marge + diagnostics.
+    Price a Phoenix note and return value, margin and diagnostics.
 
-    Les parametres produit sont exposes pour permettre les revisions
-    de l'Option B (changer UN levier et repricer).
+    Pass `paths` to reuse an existing simulation - useful when repricing
+    the same market scenario against several sets of terms.
     """
-    spread = CREDIT_GRID[expected_life]
-    disc = df_note(spread)
+    deal = deal or Deal()
 
-    paths = simulate_paths(n_paths, vol, seed)
-    n = paths.shape[0]
+    if paths is None:
+        paths = simulate_paths(schedule, spot, vol, decrement, n_paths, seed)
 
-    coupon_amt = coupon_rate * NOMINAL
-    lvl_coupon = coupon_barrier * S0
-    lvl_autocall = autocall_barrier * S0
-    lvl_capital = capital_barrier * S0
+    n_obs = len(schedule)
+    disc = schedule.df_note(credit_spread)
 
-    # --- determiner la date de sortie de chaque chemin -----------------
-    # Un chemin est rappele a la PREMIERE date d'autocall ou S >= 100 %.
-    autocall_idx = np.where(IS_AUTOCALL)[0]
-    triggered = paths[:, autocall_idx] >= lvl_autocall       # (n, 4)
+    lvl_coupon = deal.coupon_barrier * spot
+    lvl_autocall = deal.autocall_barrier * spot
+    lvl_capital = deal.capital_barrier * spot
 
-    any_call = triggered.any(axis=1)
-    # argmax renvoie l'indice du premier True ; sans True il renvoie 0,
-    # d'ou le masque any_call applique ensuite.
-    first_call_pos = np.argmax(triggered, axis=1)
-    exit_idx = np.where(any_call, autocall_idx[first_call_pos], N_OBS - 1)
+    # --- exit date of each path ---------------------------------------
+    # A path is called on the FIRST autocall date at or above the barrier.
+    call_idx = np.where(schedule.is_autocall)[0]
+    if call_idx.size:
+        triggered = paths[:, call_idx] >= lvl_autocall
+        any_call = triggered.any(axis=1)
+        # argmax on booleans returns the first True; it returns 0 when
+        # there is none, which the any_call mask then overrides.
+        exit_idx = np.where(any_call,
+                            call_idx[np.argmax(triggered, axis=1)],
+                            n_obs - 1)
+    else:
+        any_call = np.zeros(paths.shape[0], dtype=bool)
+        exit_idx = np.full(paths.shape[0], n_obs - 1)
 
-    # --- coupons -------------------------------------------------------
-    # Un coupon est paye si (a) la date est <= date de sortie et
-    #                       (b) l'indice y est >= barriere coupon.
-    obs_grid = np.arange(N_OBS)[None, :]
-    alive = obs_grid <= exit_idx[:, None]
+    # --- coupons ------------------------------------------------------
+    # Paid where the date is on or before the exit and the index is at
+    # or above the coupon barrier. No memory: a missed coupon is gone.
+    alive = np.arange(n_obs)[None, :] <= exit_idx[:, None]
     coupon_paid = alive & (paths >= lvl_coupon)
+    pv_coupons = (coupon_paid * deal.coupon_amount * disc[None, :]).sum(axis=1)
 
-    pv_coupons_per_path = (coupon_paid * coupon_amt * disc[None, :]).sum(axis=1)
-
-    # --- remboursement -------------------------------------------------
+    # --- redemption ---------------------------------------------------
     final_level = paths[:, -1]
     redemption = np.where(
         any_call,
-        NOMINAL,                                      # rappele : au pair
+        NOMINAL,                                       # called at par
         np.where(final_level >= lvl_capital,
-                 NOMINAL,                             # au-dessus barriere
-                 NOMINAL * final_level / S0),         # sous barriere
+                 NOMINAL,                              # above the barrier
+                 NOMINAL * final_level / spot),        # linear loss below
     )
-    pv_redemption_per_path = redemption * disc[exit_idx]
+    pv_redemption = redemption * disc[exit_idx]
 
-    # --- agregation ----------------------------------------------------
-    pv_per_path = pv_coupons_per_path + pv_redemption_per_path
-    fair_value = pv_per_path.mean()
+    pv_total = pv_coupons + pv_redemption
+    fair_value = float(pv_total.mean())
+    margin = deal.issue_price - fair_value / NOMINAL
 
-    margin = issue_price - fair_value / NOMINAL
+    # undiscounted cash received per path, for the outcome distribution
+    total_payout = (coupon_paid * deal.coupon_amount).sum(axis=1) + redemption
 
-    return PricingResult(
+    return Result(
         fair_value=fair_value,
         margin_pct=margin,
-        passes_floor=margin >= MARGIN_FLOOR,
-        expected_life=float(TIMES[exit_idx].mean()),
+        passes_floor=margin >= deal.margin_floor,
+        margin_gap_bp=(margin - deal.margin_floor) * 1e4,
+        expected_life=float(schedule.times[exit_idx].mean()),
         prob_autocall=float(any_call.mean()),
         prob_capital_loss=float((~any_call & (final_level < lvl_capital)).mean()),
         avg_coupons_paid=float(coupon_paid.sum(axis=1).mean()),
-        pv_coupons=float(pv_coupons_per_path.mean()),
-        pv_redemption=float(pv_redemption_per_path.mean()),
+        pv_coupons=float(pv_coupons.mean()),
+        pv_redemption=float(pv_redemption.mean()),
+        exit_times=schedule.times[exit_idx],
+        total_payout=total_payout,
+        final_level_pct=final_level / spot,
         inputs={
-            "n_paths": n, "vol": vol, "expected_life": expected_life,
-            "spread_bp": spread * 1e4, "coupon_rate": coupon_rate,
-            "coupon_barrier": coupon_barrier,
-            "autocall_barrier": autocall_barrier,
-            "capital_barrier": capital_barrier, "issue_price": issue_price,
+            "n_paths": paths.shape[0], "vol": vol, "spot": spot,
+            "decrement": decrement, "credit_spread": credit_spread,
+            "coupon_rate_pa": deal.coupon_rate_pa,
+            "coupon_barrier": deal.coupon_barrier,
+            "autocall_barrier": deal.autocall_barrier,
+            "capital_barrier": deal.capital_barrier,
+            "issue_price": deal.issue_price,
         },
     )
+
+
+def payoff_at_maturity(deal, levels_pct):
+    """
+    Redemption at final valuation, for a note that was never called.
+
+    Returns currency per note across a grid of final index levels
+    expressed as fractions of the initial level. The function is
+    discontinuous at the capital barrier: one tick below it, the holder
+    gives up the whole protected amount rather than a sliver of it.
+    """
+    levels_pct = np.asarray(levels_pct, dtype=float)
+    above = levels_pct >= deal.capital_barrier
+    redemption = np.where(above, NOMINAL, NOMINAL * levels_pct)
+    final_coupon = np.where(levels_pct >= deal.coupon_barrier,
+                            deal.coupon_amount, 0.0)
+    return redemption + final_coupon
