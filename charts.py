@@ -7,68 +7,45 @@ and a tooltip on every mark. Colour carries meaning only where the
 meaning is real - capital at risk against capital returned - and is
 always backed by a label, never left to carry identity on its own.
 
-Two palettes, one per theme. The dark set is chosen against the dark
-surface rather than flipped from the light one: a hue that reads well
-on white is usually too dark on near-black, and flipping it quietly
-breaks both the contrast floor and the separation a colour-blind reader
-depends on.
-
-The dark blue sits a little above the usual lightness band, and that is
-deliberate. Blue reads darker than red or orange at equal lightness, so
-on a near-black surface a band-compliant blue sinks into the background
-while its red partner stays crisp - the two series end up carrying
-visibly different weight for no reason in the data. Both hues are
-lifted together, which keeps them matched to each other and clear of
-the contrast floor on this surface.
+ONE palette, not one per theme. The app ships dark, but a visitor can
+switch at any time and Streamlit does not report the active theme
+reliably on the first run - detecting it meant the page rendered in the
+wrong palette for a moment before correcting itself. So the two hues
+are chosen to clear the full set of checks against a white surface and
+a near-black one alike, and the chrome around them is drawn in neutral
+grey at low opacity, which recedes on either background. Nothing has to
+know which theme is on.
 """
 
 import altair as alt
 import numpy as np
 import pandas as pd
 
-LIGHT = {
-    "protected": "#2060C9",   # capital returned in full
-    "at_risk": "#BE4A2E",     # capital reduced with the index
-    "neutral": "#8A8F98",
-    "grid": "#E3E6EA",
-    "panel": "#FCFCFB",
-    "label": "#5A6069",
-    "title": "#3C4149",
-    "text": "#3C4149",
-}
-
-DARK = {
-    "protected": "#5E9AEE",
-    "at_risk": "#E5805C",
-    "neutral": "#8C929C",
-    "grid": "#2A2D33",
-    "panel": "#15171B",
-    "label": "#9BA1AA",
-    "title": "#C6CBD2",
-    "text": "#C6CBD2",
-}
-
-_T = LIGHT
-
-
-def set_theme(mode):
-    """Select the palette. Call once per run, before drawing anything."""
-    global _T
-    _T = DARK if mode == "dark" else LIGHT
+PROTECTED = "#5091E6"     # capital returned in full
+AT_RISK = "#DC7049"       # capital reduced with the index
+NEUTRAL = "#8A9099"       # rules and reference marks
+LABEL = "#8A9099"         # axis labels and titles
 
 
 def _axis():
-    return alt.Axis(grid=True, gridColor=_T["grid"], gridOpacity=0.8,
-                    domainColor=_T["grid"], tickColor=_T["grid"],
-                    labelColor=_T["label"], titleColor=_T["title"],
+    return alt.Axis(grid=True, gridColor=NEUTRAL, gridOpacity=0.22,
+                    domainColor=NEUTRAL, domainOpacity=0.35,
+                    tickColor=NEUTRAL, tickOpacity=0.35,
+                    labelColor=LABEL, titleColor=LABEL,
+                    labelFontSize=11, titleFontSize=12)
+
+
+def _axis():
+    return alt.Axis(grid=True, gridColor=NEUTRAL, gridOpacity=0.8,
+                    domainColor=NEUTRAL, tickColor=NEUTRAL,
+                    labelColor=LABEL, titleColor=LABEL,
                     labelFontSize=11, titleFontSize=12)
 
 
 def _finish(chart, height, legend=None):
     out = chart.properties(height=height).configure_view(strokeWidth=0)
     if legend:
-        out = out.configure_legend(labelColor=_T["text"],
-                                   titleColor=_T["text"],
+        out = out.configure_legend(labelColor=LABEL, titleColor=LABEL,
                                    labelFontSize=11, titleFontSize=11,
                                    **legend)
     return out
@@ -112,8 +89,8 @@ def payoff_curve(deal, payoff_fn, n_obs=None, height=340):
         color=alt.Color("region:N", title=None,
                         scale=alt.Scale(domain=["Capital at risk",
                                                 "Capital returned"],
-                                        range=[_T["at_risk"],
-                                               _T["protected"]])),
+                                        range=[AT_RISK,
+                                               PROTECTED])),
         detail="region:N",
         tooltip=[alt.Tooltip("level_pct:Q", title="Index", format=".0f"),
                  alt.Tooltip("payout:Q", title="Redemption", format=",.0f"),
@@ -121,14 +98,14 @@ def payoff_curve(deal, payoff_fn, n_obs=None, height=340):
     )
 
     rule = alt.Chart(pd.DataFrame({"x": [barrier * 100]})).mark_rule(
-        color=_T["neutral"], strokeDash=[5, 4], strokeWidth=1.5
+        color=NEUTRAL, strokeDash=[5, 4], strokeWidth=1.5
     ).encode(x="x:Q")
 
     label = alt.Chart(pd.DataFrame({
         "x": [barrier * 100], "y": [y_top * 0.96],
         "t": [f"Capital barrier {barrier:.0%}"],
     })).mark_text(align="left", dx=7, fontSize=11,
-                  color=_T["neutral"]).encode(x="x:Q", y="y:Q", text="t:N")
+                  color=NEUTRAL).encode(x="x:Q", y="y:Q", text="t:N")
 
     return _finish(rule + line + label, height,
                    legend={"orient": "top-left", "symbolType": "stroke",
@@ -151,9 +128,8 @@ def path_fan(paths, schedule, spot, deal, n_shown=140, height=360):
         "path": np.repeat(np.arange(n_shown), len(schedule)),
     })
 
-    opacity = 0.3 if _T is DARK else 0.22
     lines = alt.Chart(df).mark_line(
-        strokeWidth=0.6, opacity=opacity, color=_T["protected"]
+        strokeWidth=0.6, opacity=0.26, color=PROTECTED
     ).encode(
         x=alt.X("t:Q", title="Years from trade date", axis=_axis()),
         y=alt.Y("level:Q", title="Index level", axis=_axis()),
@@ -166,11 +142,11 @@ def path_fan(paths, schedule, spot, deal, n_shown=140, height=360):
                   f"Coupon / capital {deal.coupon_barrier:.0%}"],
     })
     rules = alt.Chart(marks).mark_rule(
-        strokeDash=[5, 4], strokeWidth=1.5, color=_T["neutral"]
+        strokeDash=[5, 4], strokeWidth=1.5, color=NEUTRAL
     ).encode(y="y:Q", tooltip=["label:N"])
 
     text = alt.Chart(marks).mark_text(
-        align="left", dx=6, dy=-7, fontSize=11, color=_T["neutral"]
+        align="left", dx=6, dy=-7, fontSize=11, color=NEUTRAL
     ).encode(y="y:Q", text="label:N", x=alt.value(8))
 
     return _finish(lines + rules + text, height)
@@ -196,7 +172,7 @@ def payout_distribution(total_payout, issue_amount=1000.0, height=320):
                         scale=alt.Scale(
                             domain=["Below issue price",
                                     "At or above issue price"],
-                            range=[_T["at_risk"], _T["protected"]])),
+                            range=[AT_RISK, PROTECTED])),
         tooltip=[alt.Tooltip("count():Q", title="Paths"),
                  alt.Tooltip("region:N", title="")],
     )
@@ -221,14 +197,15 @@ def exit_distribution(exit_times, schedule, height=300):
 
     df = pd.DataFrame({"when": labels, "share": share, "paths": counts})
 
-    x_axis = alt.Axis(format="%", grid=True, gridColor=_T["grid"],
-                      gridOpacity=0.8, domainColor=_T["grid"],
-                      tickColor=_T["grid"], labelColor=_T["label"],
-                      titleColor=_T["title"], labelFontSize=11,
+    x_axis = alt.Axis(format="%", grid=True, gridColor=NEUTRAL,
+                      gridOpacity=0.22, domainColor=NEUTRAL,
+                      domainOpacity=0.35, tickColor=NEUTRAL,
+                      tickOpacity=0.35, labelColor=LABEL,
+                      titleColor=LABEL, labelFontSize=11,
                       titleFontSize=12)
 
     bars = alt.Chart(df).mark_bar(
-        color=_T["protected"], cornerRadiusEnd=4, size=26
+        color=PROTECTED, cornerRadiusEnd=4, size=26
     ).encode(
         y=alt.Y("when:N", title=None, sort=None, axis=_axis()),
         x=alt.X("share:Q", title="Share of simulated paths", axis=x_axis),
@@ -238,7 +215,7 @@ def exit_distribution(exit_times, schedule, height=300):
     )
 
     labels_layer = alt.Chart(df).mark_text(
-        align="left", dx=6, fontSize=11, color=_T["label"]
+        align="left", dx=6, fontSize=11, color=LABEL
     ).encode(y=alt.Y("when:N", sort=None), x="share:Q",
              text=alt.Text("share:Q", format=".0%"))
 
@@ -258,8 +235,8 @@ def vol_sensitivity(rows, floor, height=300):
     df["margin_pct"] = df["margin"] * 100
 
     line = alt.Chart(df).mark_line(
-        strokeWidth=2.5, color=_T["protected"],
-        point=alt.OverlayMarkDef(size=70, color=_T["protected"]),
+        strokeWidth=2.5, color=PROTECTED,
+        point=alt.OverlayMarkDef(size=70, color=PROTECTED),
     ).encode(
         x=alt.X("vol_pct:Q", title="Implied volatility (%)",
                 scale=alt.Scale(zero=False), axis=_axis()),
@@ -270,13 +247,13 @@ def vol_sensitivity(rows, floor, height=300):
     )
 
     floor_rule = alt.Chart(pd.DataFrame({"y": [floor * 100]})).mark_rule(
-        color=_T["at_risk"], strokeDash=[5, 4], strokeWidth=1.5
+        color=AT_RISK, strokeDash=[5, 4], strokeWidth=1.5
     ).encode(y="y:Q")
 
     floor_text = alt.Chart(pd.DataFrame({
         "y": [floor * 100], "t": [f"Margin floor {floor:.2%}"],
     })).mark_text(align="left", dy=-8, fontSize=11,
-                  color=_T["at_risk"]).encode(y="y:Q", text="t:N",
+                  color=AT_RISK).encode(y="y:Q", text="t:N",
                                               x=alt.value(8))
 
     return _finish(floor_rule + line + floor_text, height)
@@ -293,8 +270,8 @@ def stepdown_schedule(schedule, height=240):
     df = pd.DataFrame({"t": times, "level": levels * 100})
 
     line = alt.Chart(df).mark_line(
-        strokeWidth=2.5, color=_T["protected"], interpolate="step-after",
-        point=alt.OverlayMarkDef(size=70, color=_T["protected"]),
+        strokeWidth=2.5, color=PROTECTED, interpolate="step-after",
+        point=alt.OverlayMarkDef(size=70, color=PROTECTED),
     ).encode(
         x=alt.X("t:Q", title="Years from trade date", axis=_axis()),
         y=alt.Y("level:Q", title="Autocall trigger (% of initial)",
@@ -304,7 +281,7 @@ def stepdown_schedule(schedule, height=240):
     )
 
     labels = alt.Chart(df).mark_text(
-        dy=-12, fontSize=11, color=_T["label"]
+        dy=-12, fontSize=11, color=LABEL
     ).encode(x="t:Q", y="level:Q", text=alt.Text("level:Q", format=".0f"))
 
     return _finish(line + labels, height)
